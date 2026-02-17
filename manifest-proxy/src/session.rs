@@ -184,6 +184,7 @@ mod tests {
         let policy = PolicyConfig::new(vec![
                 manifest_core::PolicyRule::SpendingLimit {
                     max_transaction_value: 1000,
+                    field_path: None,
                 },
                 manifest_core::PolicyRule::PiiFlag {
                     flag_if_contains: vec!["SSN".into()],

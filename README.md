@@ -47,10 +47,33 @@ AI agents are moving money, accessing PII, and making consequential decisions. B
 
 ## Installation
 
+### Pre-built binaries (recommended)
+
+Download the latest release for your platform from [GitHub Releases](https://github.com/port-authority/manifest/releases):
+
+```bash
+# macOS (Apple Silicon)
+curl -L https://github.com/port-authority/manifest/releases/latest/download/manifest-aarch64-apple-darwin.tar.gz | tar xz
+sudo mv manifest /usr/local/bin/
+
+# macOS (Intel)
+curl -L https://github.com/port-authority/manifest/releases/latest/download/manifest-x86_64-apple-darwin.tar.gz | tar xz
+sudo mv manifest /usr/local/bin/
+
+# Linux (x86_64)
+curl -L https://github.com/port-authority/manifest/releases/latest/download/manifest-x86_64-unknown-linux-gnu.tar.gz | tar xz
+sudo mv manifest /usr/local/bin/
+
+# Linux (ARM64)
+curl -L https://github.com/port-authority/manifest/releases/latest/download/manifest-aarch64-unknown-linux-gnu.tar.gz | tar xz
+sudo mv manifest /usr/local/bin/
+```
+
+### Build from source
+
 Requires [Rust](https://rustup.rs/) (1.70+).
 
 ```bash
-# Clone and build
 git clone https://github.com/port-authority/manifest.git
 cd manifest
 cargo build --release
@@ -114,6 +137,9 @@ manifest export --format html --output report.html
 
 # Verify a receipt's signature, hash, and Merkle proof
 manifest verify <receipt-hash> --public-key ~/.manifest/signing.key.pub
+
+# Verify Merkle tree integrity (works even after pruning)
+manifest verify --tree-only
 
 # Delete receipts older than 90 days
 manifest prune --older-than 90d
@@ -249,6 +275,7 @@ Define policies in a simple YAML file:
 policies:
   - name: spending-limit
     max_transaction_value: 50000
+    field_path: "$.amount"    # Only check the "amount" field (omit to check all numeric values)
 
   - name: tool-allowlist
     allowed_tools:
@@ -351,17 +378,17 @@ server {
 
 ## Known Limitations
 
-**Spending limits check all numeric values.** The spending limit policy scans every numeric value in the JSON input recursively. A tool call like `{"page": 50000, "limit": 100}` would trigger a violation for the pagination parameter. There is no way to specify which field represents monetary value — all numbers are checked.
+**Spending limits check all numeric values by default.** Without `field_path`, the spending limit policy scans every numeric value in the JSON input recursively. A tool call like `{"page": 50000, "limit": 100}` would trigger a violation for the pagination parameter. Use `field_path: "$.amount"` to specify which field represents monetary value.
 
 **PII string matching has false positives.** The `pii-flag` rule uses case-insensitive substring matching, so "assign" matches "ssn". Use the `pii-regex` rule for precise pattern matching when this is a concern.
 
-**Single-writer SQLite.** The `Arc<Mutex<Storage>>` pattern works for a single proxy instance. Running two proxy instances pointing at the same database file will cause lock contention. Use separate database files for concurrent proxies.
+**Single-writer SQLite.** The `Arc<Mutex<Storage>>` pattern works for a single proxy instance. Running two proxy instances pointing at the same database file will cause lock contention. Use separate database files for concurrent proxies. The storage layer is abstracted behind a `StorageBackend` trait for future backend support (ClickHouse, Postgres, etc.).
 
 **Receipt payload truncation.** Tool outputs larger than 256 KB (configurable via `MANIFEST_MAX_PAYLOAD_BYTES`) are replaced with a SHA-256 hash reference in the receipt. The original payload is not stored — only its hash. This prevents SQLite bloat but means large outputs cannot be fully reconstructed from receipts alone.
 
 **Identity is self-declared.** In the open-source version, agent identity comes from the MCP handshake, a config file, or the environment. None of these sources are cryptographically verified (`"verified": false`). An agent can claim to be anything.
 
-**Pruning does not remove Merkle leaves.** `manifest prune` deletes receipt records from SQLite but leaves the Merkle tree intact (it is append-only by design). After pruning, `manifest verify` will fail for deleted receipts since the receipt JSON is gone, but the Merkle tree remains consistent for non-pruned receipts. Pruning is for storage management, not for Merkle tree maintenance.
+**Pruning does not remove Merkle leaves.** `manifest prune` deletes receipt records from SQLite but leaves the Merkle tree intact (it is append-only by design). After pruning, `manifest verify` will fail for deleted receipts since the receipt JSON is gone. Use `manifest verify --tree-only` to validate the Merkle tree's structural integrity independently — this proves that receipts existed at each position even after pruning.
 
 **No TLS built in.** The HTTP proxy binds to `127.0.0.1` and serves plaintext HTTP. For network deployments, place a reverse proxy (nginx, caddy) in front to terminate TLS. Bearer tokens travel in plaintext without TLS.
 
@@ -387,6 +414,14 @@ This is still more than any enterprise currently has.
 - [x] Real-time violation alerts (`--webhook` + stderr logging)
 - [x] Live receipt tailing (`manifest watch`)
 - [x] HTML export (`manifest export --format html` — shareable, self-contained report)
+- [x] Field-path spending limits (`field_path: "$.amount"` for precise checks)
+- [x] Storage trait abstraction (`StorageBackend` trait for pluggable backends)
+- [x] Merkle tree integrity verification (`manifest verify --tree-only`)
+- [ ] REST/gRPC API interception
+- [ ] OPA/Rego policy integration
+- [ ] HSM/KMS key management (key rotation, cloud KMS integration)
+- [ ] SIEM/S3 export (Splunk, Sentinel, cloud storage)
+- [ ] Dashboard UI
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for how to get involved.
 

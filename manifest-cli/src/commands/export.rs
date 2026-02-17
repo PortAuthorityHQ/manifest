@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use manifest_core::{ManifestError, Receipt, Storage};
+use manifest_core::{ManifestError, Receipt, Storage, StorageBackend};
 
 use crate::commands::init::resolve_db_path;
 

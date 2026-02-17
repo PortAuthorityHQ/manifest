@@ -18,4 +18,4 @@ pub use policy::{PolicyConfig, PolicyRule, PolicySnapshot};
 pub use proof::Proof;
 pub use receipt::{Receipt, ReceiptBuilder};
 pub use signing::{load_public_key, verify_with_public_key, Signer};
-pub use storage::Storage;
+pub use storage::{Storage, StorageBackend};

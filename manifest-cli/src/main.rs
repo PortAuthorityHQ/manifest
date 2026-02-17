@@ -85,16 +85,20 @@ enum Commands {
 
     /// Verify a receipt's signature and Merkle proof
     Verify {
-        /// Receipt content hash or ID
-        hash: String,
+        /// Receipt content hash or ID (not required with --tree-only)
+        hash: Option<String>,
 
-        /// Path to the public key file (.pub)
+        /// Path to the public key file (.pub) (not required with --tree-only)
         #[arg(long)]
-        public_key: String,
+        public_key: Option<String>,
 
         /// Path to the SQLite database
         #[arg(long)]
         db: Option<String>,
+
+        /// Verify Merkle tree structural integrity only (no receipt needed)
+        #[arg(long, default_value = "false")]
+        tree_only: bool,
     },
 
     /// Start the HTTP proxy for remote MCP servers (Streamable HTTP transport)
@@ -205,8 +209,18 @@ async fn main() -> anyhow::Result<()> {
         Commands::Export { session, format, output, db } => {
             commands::export::run(session.as_deref(), &format, output.as_deref(), db.as_deref())?;
         }
-        Commands::Verify { hash, public_key, db } => {
-            commands::verify::run(&hash, &public_key, db.as_deref())?;
+        Commands::Verify { hash, public_key, db, tree_only } => {
+            if tree_only {
+                commands::verify::run_tree_only(db.as_deref())?;
+            } else {
+                let hash = hash.as_deref().ok_or_else(|| {
+                    anyhow::anyhow!("receipt hash is required (or use --tree-only)")
+                })?;
+                let pk = public_key.as_deref().ok_or_else(|| {
+                    anyhow::anyhow!("--public-key is required (or use --tree-only)")
+                })?;
+                commands::verify::run(hash, pk, db.as_deref())?;
+            }
         }
         Commands::ProxyHttp { upstream, port, identity, policy, key, db, token, rate_limit, webhook } => {
             commands::proxy_http::run(

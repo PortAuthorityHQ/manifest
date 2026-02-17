@@ -48,7 +48,13 @@ impl Clone for PolicyConfig {
 #[serde(tag = "name")]
 pub enum PolicyRule {
     #[serde(rename = "spending-limit")]
-    SpendingLimit { max_transaction_value: u64 },
+    SpendingLimit {
+        max_transaction_value: u64,
+        /// Optional JSON pointer path to the monetary field (e.g., "$.amount"
+        /// or "/order/total"). If omitted, checks ALL numeric values recursively.
+        #[serde(default)]
+        field_path: Option<String>,
+    },
 
     #[serde(rename = "tool-allowlist")]
     ToolAllowlist { allowed_tools: Vec<String> },
@@ -101,7 +107,7 @@ impl PolicyConfig {
 
         for rule in &self.policies {
             match rule {
-                PolicyRule::SpendingLimit { max_transaction_value } => {
+                PolicyRule::SpendingLimit { max_transaction_value, .. } => {
                     max_value = Some(*max_transaction_value);
                 }
                 PolicyRule::ToolAllowlist { allowed_tools } => {
@@ -177,8 +183,15 @@ impl PolicyConfig {
                 }
                 PolicyRule::SpendingLimit {
                     max_transaction_value,
+                    field_path,
                 } => {
-                    for value in extract_numeric_values(input) {
+                    let values = match field_path {
+                        Some(path) => resolve_field_path(input, path)
+                            .into_iter()
+                            .collect::<Vec<_>>(),
+                        None => extract_numeric_values(input),
+                    };
+                    for value in values {
                         if value > *max_transaction_value as f64 {
                             violations.push(format!(
                                 "spending_limit_exceeded: value {value} exceeds max {max_transaction_value}"
@@ -230,6 +243,41 @@ impl PolicyConfig {
 
         violations
     }
+}
+
+/// Resolve a field path (dot-notation or JSON pointer) to a numeric value.
+///
+/// Supports:
+/// - Dot notation: `"$.amount"`, `"amount"`, `"order.total"`
+/// - JSON pointer: `"/order/total"`
+///
+/// Returns `Some(f64)` if the path resolves to a number, `None` otherwise.
+fn resolve_field_path(value: &serde_json::Value, path: &str) -> Option<f64> {
+    // Normalize path: strip leading "$." and split on "." or use JSON pointer
+    let parts: Vec<&str> = if path.starts_with('/') {
+        // JSON pointer format: /order/total
+        path.split('/').filter(|s| !s.is_empty()).collect()
+    } else {
+        // Dot notation: $.amount or order.total
+        let stripped = path.strip_prefix("$.").unwrap_or(path);
+        stripped.split('.').collect()
+    };
+
+    let mut current = value;
+    for part in parts {
+        match current {
+            serde_json::Value::Object(map) => {
+                current = map.get(part)?;
+            }
+            serde_json::Value::Array(arr) => {
+                let idx: usize = part.parse().ok()?;
+                current = arr.get(idx)?;
+            }
+            _ => return None,
+        }
+    }
+
+    current.as_f64()
 }
 
 /// Recursively extract all numeric values from a JSON value.
@@ -309,6 +357,7 @@ policies:
         let config = PolicyConfig::new(vec![
                 PolicyRule::SpendingLimit {
                     max_transaction_value: 10000,
+                    field_path: None,
                 },
                 PolicyRule::ToolAllowlist {
                     allowed_tools: vec!["read_file".into()],
@@ -335,6 +384,7 @@ policies:
     fn no_allowlist_returns_none() {
         let config = PolicyConfig::new(vec![PolicyRule::SpendingLimit {
                 max_transaction_value: 5000,
+                field_path: None,
             }]);
         assert_eq!(config.is_tool_allowed("anything"), None);
     }
@@ -343,6 +393,7 @@ policies:
     fn evaluate_spending_limit_violation() {
         let config = PolicyConfig::new(vec![PolicyRule::SpendingLimit {
                 max_transaction_value: 10000,
+                field_path: None,
             }]);
 
         let input = serde_json::json!({"amount": 50000, "currency": "USD"});
@@ -356,6 +407,7 @@ policies:
     fn evaluate_spending_limit_nested() {
         let config = PolicyConfig::new(vec![PolicyRule::SpendingLimit {
                 max_transaction_value: 1000,
+                field_path: None,
             }]);
 
         let input = serde_json::json!({
@@ -373,6 +425,7 @@ policies:
     fn evaluate_spending_limit_passes() {
         let config = PolicyConfig::new(vec![PolicyRule::SpendingLimit {
                 max_transaction_value: 10000,
+                field_path: None,
             }]);
 
         let input = serde_json::json!({"amount": 500});
@@ -425,6 +478,7 @@ policies:
                 },
                 PolicyRule::SpendingLimit {
                     max_transaction_value: 1000,
+                    field_path: None,
                 },
                 PolicyRule::PiiFlag {
                     flag_if_contains: vec!["SSN".into()],
@@ -523,9 +577,63 @@ policies:
     }
 
     #[test]
+    fn evaluate_spending_limit_field_path() {
+        let config = PolicyConfig::new(vec![PolicyRule::SpendingLimit {
+                max_transaction_value: 50000,
+                field_path: Some("$.amount".into()),
+            }]);
+
+        // Only the "amount" field is checked, not "page"
+        let input = serde_json::json!({"amount": 100000, "page": 99999});
+        let violations = config.evaluate("transfer", &input, None);
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].contains("100000"));
+    }
+
+    #[test]
+    fn evaluate_spending_limit_field_path_passes() {
+        let config = PolicyConfig::new(vec![PolicyRule::SpendingLimit {
+                max_transaction_value: 50000,
+                field_path: Some("$.amount".into()),
+            }]);
+
+        // "page" is high but "amount" is low — should pass
+        let input = serde_json::json!({"amount": 100, "page": 99999});
+        let violations = config.evaluate("transfer", &input, None);
+        assert!(violations.is_empty());
+    }
+
+    #[test]
+    fn evaluate_spending_limit_field_path_nested() {
+        let config = PolicyConfig::new(vec![PolicyRule::SpendingLimit {
+                max_transaction_value: 5000,
+                field_path: Some("$.order.total".into()),
+            }]);
+
+        let input = serde_json::json!({"order": {"total": 10000, "items": 3}});
+        let violations = config.evaluate("checkout", &input, None);
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].contains("10000"));
+    }
+
+    #[test]
+    fn evaluate_spending_limit_field_path_missing() {
+        let config = PolicyConfig::new(vec![PolicyRule::SpendingLimit {
+                max_transaction_value: 50000,
+                field_path: Some("$.amount".into()),
+            }]);
+
+        // Field doesn't exist — no violation (nothing to check)
+        let input = serde_json::json!({"quantity": 100000});
+        let violations = config.evaluate("transfer", &input, None);
+        assert!(violations.is_empty());
+    }
+
+    #[test]
     fn snapshot_hash_is_deterministic() {
         let config = PolicyConfig::new(vec![PolicyRule::SpendingLimit {
                 max_transaction_value: 100,
+                field_path: None,
             }]);
         assert_eq!(config.snapshot_hash(), config.snapshot_hash());
     }

@@ -89,3 +89,7 @@ cargo test -p manifest-proxy   # Test just proxy
 - `--webhook` flag on proxy/proxy-http sends violation alerts as JSON POST to the configured URL. Violations are always logged to stderr regardless.
 - `manifest watch` polls the database every 500ms. It only shows receipts created after the command starts (not historical). Uses color-coded status output (ANSI escape codes).
 - `manifest export --format html` generates a self-contained HTML file with inline CSS (dark theme, GitHub-style). No JS, no external resources. All user content is HTML-escaped via `escape_html()` in export.rs.
+- `StorageBackend` trait in `manifest-core/src/storage.rs` — all storage methods are on the trait, not inherent. Any file calling `Storage` methods must `use manifest_core::StorageBackend` or the methods won't resolve.
+- `SpendingLimit` has an optional `field_path` for targeting specific JSON fields (dot notation `$.amount` or JSON pointer `/order/total`). When `None`, falls back to scanning all numeric values.
+- `manifest verify --tree-only` validates Merkle tree structural integrity without needing a receipt hash or public key. Useful after pruning.
+- GitHub Actions: `ci.yml` runs on push/PR to main (build + test + both e2e). `release.yml` triggers on `v*` tags and builds binaries for 4 targets (linux x86_64/aarch64, macOS x86_64/aarch64).

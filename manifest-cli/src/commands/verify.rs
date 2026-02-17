@@ -1,4 +1,4 @@
-use manifest_core::{load_public_key, verify_with_public_key, ManifestError, MerkleTree, Storage};
+use manifest_core::{load_public_key, verify_with_public_key, ManifestError, MerkleTree, Storage, StorageBackend};
 
 use crate::commands::init::resolve_db_path;
 
@@ -138,6 +138,73 @@ pub fn run(hash: &str, public_key_path: &str, db: Option<&str>) -> Result<(), Ma
         println!("Receipt verification FAILED.");
         return Err(ManifestError::Signing(
             "receipt verification failed".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+/// Verify Merkle tree structural integrity without requiring a specific receipt.
+///
+/// Rebuilds the tree from stored leaves and verifies that each leaf has a
+/// valid inclusion proof against the final root. This proves the tree is
+/// internally consistent even if individual receipts have been pruned.
+pub fn run_tree_only(db: Option<&str>) -> Result<(), ManifestError> {
+    let db_path = resolve_db_path(db);
+
+    if !db_path.exists() {
+        return Err(ManifestError::NotFound(
+            "no receipt database found".to_string(),
+        ));
+    }
+
+    let storage = Storage::open(&db_path)?;
+    let leaves = storage.load_merkle_leaves()?;
+
+    if leaves.is_empty() {
+        println!("  SKIP  No Merkle tree data found");
+        return Ok(());
+    }
+
+    let tree = MerkleTree::from_leaves(leaves.clone());
+    let root = tree.root();
+    let root_hex = root.strip_prefix("sha256:").unwrap_or(&root);
+
+    println!("Merkle tree: {} leaves", leaves.len());
+    println!("Root: {root}");
+    println!();
+
+    let root_bytes: [u8; 32] = hex::decode(root_hex)
+        .map_err(|e| ManifestError::Signing(format!("bad hex: {e}")))?
+        .try_into()
+        .map_err(|_| ManifestError::Signing("root not 32 bytes".into()))?;
+
+    let mut all_passed = true;
+    let mut verified = 0;
+
+    for (idx, leaf) in leaves.iter().enumerate() {
+        if let Some(proof) = tree.proof(idx) {
+            if MerkleTree::verify_proof(*leaf, &proof, &root_bytes) {
+                verified += 1;
+            } else {
+                println!("  FAIL  Leaf {idx} — inclusion proof invalid");
+                all_passed = false;
+            }
+        } else {
+            println!("  FAIL  Leaf {idx} — no proof available");
+            all_passed = false;
+        }
+    }
+
+    if all_passed {
+        println!("  PASS  All {verified}/{} leaves verified against root", leaves.len());
+        println!();
+        println!("Merkle tree integrity verified.");
+    } else {
+        println!();
+        println!("Merkle tree verification FAILED.");
+        return Err(ManifestError::Signing(
+            "merkle tree verification failed".to_string(),
         ));
     }
 

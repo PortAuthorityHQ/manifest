@@ -1,4 +1,4 @@
-use manifest_core::{ManifestError, Storage};
+use manifest_core::{ManifestError, Storage, StorageBackend};
 
 use crate::commands::init::resolve_db_path;
 

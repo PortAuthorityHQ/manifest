@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use manifest_core::{
-    AgentIdentity, ManifestError, MerkleTree, PolicyConfig, Signer, Storage,
+    AgentIdentity, ManifestError, MerkleTree, PolicyConfig, Signer, Storage, StorageBackend,
 };
 use manifest_proxy::child::ChildProcess;
 use manifest_proxy::receipt_builder::{receipt_worker, AlertConfig};

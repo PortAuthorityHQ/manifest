@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
 use manifest_core::{
-    Action, ActionError, MerkleTree, ReceiptBuilder, Signer, Storage,
+    Action, ActionError, MerkleTree, ReceiptBuilder, Signer, Storage, StorageBackend,
 };
 use tokio::sync::mpsc;
 

@@ -3,6 +3,23 @@ use rusqlite::{params, Connection};
 use crate::error::ManifestError;
 use crate::receipt::Receipt;
 
+/// Trait abstracting the storage backend for receipts and Merkle tree data.
+///
+/// The default implementation is SQLite (`Storage`). Enterprise deployments
+/// can implement this trait for other backends (e.g., ClickHouse, Postgres).
+pub trait StorageBackend {
+    fn insert_receipt(&self, receipt: &Receipt, session_id: Option<&str>) -> Result<(), ManifestError>;
+    fn get_receipt_by_id(&self, id: &str) -> Result<Option<Receipt>, ManifestError>;
+    fn get_receipt_by_hash(&self, hash: &str) -> Result<Option<Receipt>, ManifestError>;
+    fn list_receipts(&self, limit: usize, offset: usize) -> Result<Vec<Receipt>, ManifestError>;
+    fn list_by_session(&self, session_id: &str, limit: usize, offset: usize) -> Result<Vec<Receipt>, ManifestError>;
+    fn latest_receipt_hash(&self) -> Result<Option<String>, ManifestError>;
+    fn count_receipts(&self) -> Result<usize, ManifestError>;
+    fn insert_merkle_leaf(&self, index: u64, leaf_hash: &[u8; 32]) -> Result<(), ManifestError>;
+    fn load_merkle_leaves(&self) -> Result<Vec<[u8; 32]>, ManifestError>;
+    fn prune_before(&self, cutoff: &str) -> Result<usize, ManifestError>;
+}
+
 /// SQLite-backed storage for receipts and Merkle tree leaves.
 pub struct Storage {
     conn: Connection,
@@ -61,8 +78,10 @@ impl Storage {
         Ok(())
     }
 
-    /// Insert a receipt into storage.
-    pub fn insert_receipt(
+}
+
+impl StorageBackend for Storage {
+    fn insert_receipt(
         &self,
         receipt: &Receipt,
         session_id: Option<&str>,
@@ -86,8 +105,7 @@ impl Storage {
         Ok(())
     }
 
-    /// Get a receipt by its ID (`urn:uuid:...`).
-    pub fn get_receipt_by_id(&self, id: &str) -> Result<Option<Receipt>, ManifestError> {
+    fn get_receipt_by_id(&self, id: &str) -> Result<Option<Receipt>, ManifestError> {
         let mut stmt = self
             .conn
             .prepare("SELECT receipt_json FROM receipts WHERE id = ?1")?;
@@ -103,8 +121,7 @@ impl Storage {
         }
     }
 
-    /// Get a receipt by its content hash (`sha256:...`).
-    pub fn get_receipt_by_hash(&self, hash: &str) -> Result<Option<Receipt>, ManifestError> {
+    fn get_receipt_by_hash(&self, hash: &str) -> Result<Option<Receipt>, ManifestError> {
         let mut stmt = self
             .conn
             .prepare("SELECT receipt_json FROM receipts WHERE content_hash = ?1")?;
@@ -120,8 +137,7 @@ impl Storage {
         }
     }
 
-    /// List receipts with pagination (newest first).
-    pub fn list_receipts(
+    fn list_receipts(
         &self,
         limit: usize,
         offset: usize,
@@ -142,8 +158,7 @@ impl Storage {
         Ok(receipts)
     }
 
-    /// List receipts filtered by session ID.
-    pub fn list_by_session(
+    fn list_by_session(
         &self,
         session_id: &str,
         limit: usize,
@@ -165,8 +180,7 @@ impl Storage {
         Ok(receipts)
     }
 
-    /// Store a Merkle leaf hash for tree reconstruction on restart.
-    pub fn insert_merkle_leaf(
+    fn insert_merkle_leaf(
         &self,
         index: u64,
         leaf_hash: &[u8; 32],
@@ -178,8 +192,7 @@ impl Storage {
         Ok(())
     }
 
-    /// Load all Merkle leaves ordered by index (for tree restoration).
-    pub fn load_merkle_leaves(&self) -> Result<Vec<[u8; 32]>, ManifestError> {
+    fn load_merkle_leaves(&self) -> Result<Vec<[u8; 32]>, ManifestError> {
         let mut stmt = self
             .conn
             .prepare("SELECT leaf_hash FROM merkle_leaves ORDER BY leaf_index ASC")?;
@@ -196,11 +209,7 @@ impl Storage {
         Ok(leaves)
     }
 
-    /// Delete receipts older than the given timestamp.
-    ///
-    /// Returns the number of receipts deleted. Note: this does NOT prune
-    /// Merkle leaves — the Merkle tree is append-only by design.
-    pub fn prune_before(&self, cutoff: &str) -> Result<usize, ManifestError> {
+    fn prune_before(&self, cutoff: &str) -> Result<usize, ManifestError> {
         let deleted = self.conn.execute(
             "DELETE FROM receipts WHERE timestamp < ?1",
             params![cutoff],
@@ -208,15 +217,13 @@ impl Storage {
         Ok(deleted)
     }
 
-    /// Count total receipts in the database.
-    pub fn count_receipts(&self) -> Result<usize, ManifestError> {
+    fn count_receipts(&self) -> Result<usize, ManifestError> {
         let mut stmt = self.conn.prepare("SELECT COUNT(*) FROM receipts")?;
         let count: i64 = stmt.query_row([], |row| row.get(0))?;
         Ok(count as usize)
     }
 
-    /// Get the content hash of the most recent receipt (for chaining).
-    pub fn latest_receipt_hash(&self) -> Result<Option<String>, ManifestError> {
+    fn latest_receipt_hash(&self) -> Result<Option<String>, ManifestError> {
         let mut stmt = self
             .conn
             .prepare("SELECT content_hash FROM receipts ORDER BY timestamp DESC LIMIT 1")?;
