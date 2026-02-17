@@ -70,7 +70,7 @@ enum Commands {
         #[arg(long)]
         session: Option<String>,
 
-        /// Output format (json, jsonl)
+        /// Output format (json, jsonl, html)
         #[arg(long, default_value = "json")]
         format: String,
 

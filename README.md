@@ -109,6 +109,9 @@ manifest inspect <receipt-hash>
 # Export an audit-ready bundle for a session
 manifest export --session <session-id> --format json
 
+# Generate a shareable HTML report (self-contained, no dependencies)
+manifest export --format html --output report.html
+
 # Verify a receipt's signature, hash, and Merkle proof
 manifest verify <receipt-hash> --public-key ~/.manifest/signing.key.pub
 
@@ -383,9 +386,7 @@ This is still more than any enterprise currently has.
 - [x] Database retention (`manifest prune --older-than 90d`)
 - [x] Real-time violation alerts (`--webhook` + stderr logging)
 - [x] Live receipt tailing (`manifest watch`)
-- [ ] REST API interception (requires per-API config)
-- [ ] OPA/Rego policy integration
-- [ ] Dashboard UI
+- [x] HTML export (`manifest export --format html` — shareable, self-contained report)
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for how to get involved.
 

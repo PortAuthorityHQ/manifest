@@ -88,3 +88,4 @@ cargo test -p manifest-proxy   # Test just proxy
 - `/health` endpoint is NOT behind auth middleware — it's always accessible for load balancer probes.
 - `--webhook` flag on proxy/proxy-http sends violation alerts as JSON POST to the configured URL. Violations are always logged to stderr regardless.
 - `manifest watch` polls the database every 500ms. It only shows receipts created after the command starts (not historical). Uses color-coded status output (ANSI escape codes).
+- `manifest export --format html` generates a self-contained HTML file with inline CSS (dark theme, GitHub-style). No JS, no external resources. All user content is HTML-escaped via `escape_html()` in export.rs.

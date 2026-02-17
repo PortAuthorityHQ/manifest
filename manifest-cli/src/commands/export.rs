@@ -1,8 +1,10 @@
-use manifest_core::{ManifestError, Storage};
+use std::collections::HashSet;
+
+use manifest_core::{ManifestError, Receipt, Storage};
 
 use crate::commands::init::resolve_db_path;
 
-/// Export receipts as JSON or JSONL.
+/// Export receipts as JSON, JSONL, or HTML.
 pub fn run(
     session: Option<&str>,
     format: &str,
@@ -31,9 +33,10 @@ pub fn run(
             .map(serde_json::to_string)
             .collect::<Result<Vec<_>, _>>()?
             .join("\n"),
+        "html" => render_html(&receipts),
         other => {
             return Err(ManifestError::Config(format!(
-                "unsupported format: '{other}'. Use 'json' or 'jsonl'."
+                "unsupported format: '{other}'. Use 'json', 'jsonl', or 'html'."
             )));
         }
     };
@@ -53,4 +56,440 @@ pub fn run(
     }
 
     Ok(())
+}
+
+fn escape_html(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+fn truncate_hash(hash: &str, len: usize) -> String {
+    if hash.len() > len {
+        format!("{}…", &hash[..len])
+    } else {
+        hash.to_string()
+    }
+}
+
+fn render_html(receipts: &[Receipt]) -> String {
+    let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC");
+    let total = receipts.len();
+
+    let violation_count = receipts
+        .iter()
+        .filter(|r| {
+            r.delta
+                .as_ref()
+                .map(|d| !d.violations.is_empty())
+                .unwrap_or(false)
+        })
+        .count();
+
+    let tools: HashSet<&str> = receipts.iter().map(|r| r.action.tool.as_str()).collect();
+    let agents: HashSet<&str> = receipts.iter().map(|r| r.agent.name.as_str()).collect();
+
+    let mut html = String::with_capacity(64 * 1024);
+
+    // Header
+    html.push_str(&format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Manifest — Agent Activity Report</title>
+<style>
+:root {{
+  --bg: #0d1117;
+  --surface: #161b22;
+  --border: #30363d;
+  --text: #e6edf3;
+  --text-muted: #8b949e;
+  --green: #3fb950;
+  --green-bg: #0d2818;
+  --red: #f85149;
+  --red-bg: #3d1214;
+  --yellow: #d29922;
+  --yellow-bg: #2d2000;
+  --blue: #58a6ff;
+  --purple: #bc8cff;
+}}
+* {{ margin: 0; padding: 0; box-sizing: border-box; }}
+body {{
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  padding: 32px;
+  max-width: 1200px;
+  margin: 0 auto;
+}}
+h1 {{
+  font-size: 24px;
+  font-weight: 600;
+  margin-bottom: 4px;
+}}
+.subtitle {{
+  color: var(--text-muted);
+  font-size: 13px;
+  margin-bottom: 24px;
+}}
+.stats {{
+  display: flex;
+  gap: 16px;
+  margin-bottom: 32px;
+  flex-wrap: wrap;
+}}
+.stat {{
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px 24px;
+  min-width: 140px;
+}}
+.stat-value {{
+  font-size: 28px;
+  font-weight: 700;
+  line-height: 1.2;
+}}
+.stat-value.violations {{ color: var(--red); }}
+.stat-label {{
+  color: var(--text-muted);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}}
+.receipt {{
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-bottom: 12px;
+  overflow: hidden;
+}}
+.receipt-header {{
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 20px;
+  flex-wrap: wrap;
+}}
+.receipt-header .time {{
+  color: var(--text-muted);
+  font-size: 13px;
+  font-family: 'SF Mono', SFMono-Regular, Consolas, 'Liberation Mono', Menlo, monospace;
+  min-width: 160px;
+}}
+.receipt-header .tool {{
+  font-weight: 600;
+  font-size: 15px;
+  color: var(--blue);
+}}
+.receipt-header .agent {{
+  color: var(--purple);
+  font-size: 13px;
+}}
+.badge {{
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}}
+.badge-ok {{
+  background: var(--green-bg);
+  color: var(--green);
+  border: 1px solid #1a4d2e;
+}}
+.badge-violation {{
+  background: var(--red-bg);
+  color: var(--red);
+  border: 1px solid #5c1d1f;
+}}
+.badge-denied {{
+  background: var(--yellow-bg);
+  color: var(--yellow);
+  border: 1px solid #4d3800;
+}}
+.badge-none {{
+  background: var(--surface);
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+}}
+.badge-error {{
+  background: var(--red-bg);
+  color: var(--red);
+  border: 1px solid #5c1d1f;
+}}
+.violations-list {{
+  padding: 0 20px 12px 20px;
+}}
+.violation-item {{
+  color: var(--red);
+  font-size: 13px;
+  padding: 2px 0;
+}}
+.violation-item::before {{
+  content: "⚠ ";
+}}
+details {{
+  border-top: 1px solid var(--border);
+}}
+summary {{
+  padding: 10px 20px;
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: 13px;
+  user-select: none;
+}}
+summary:hover {{
+  color: var(--text);
+}}
+.detail-body {{
+  padding: 0 20px 16px 20px;
+}}
+pre {{
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px 16px;
+  font-family: 'SF Mono', SFMono-Regular, Consolas, 'Liberation Mono', Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text);
+}}
+.proof-grid {{
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 16px;
+  font-size: 12px;
+  font-family: 'SF Mono', SFMono-Regular, Consolas, 'Liberation Mono', Menlo, monospace;
+}}
+.proof-label {{
+  color: var(--text-muted);
+}}
+.proof-value {{
+  color: var(--text);
+  word-break: break-all;
+}}
+.error-box {{
+  background: var(--red-bg);
+  border: 1px solid #5c1d1f;
+  border-radius: 6px;
+  padding: 12px 16px;
+  margin-bottom: 12px;
+}}
+.error-code {{
+  color: var(--red);
+  font-weight: 600;
+  font-size: 13px;
+}}
+.error-msg {{
+  color: var(--text);
+  font-size: 13px;
+}}
+.footer {{
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 12px;
+  margin-top: 40px;
+  padding-top: 20px;
+  border-top: 1px solid var(--border);
+}}
+.footer a {{ color: var(--blue); text-decoration: none; }}
+.source-badge {{
+  font-size: 11px;
+  color: var(--text-muted);
+  background: var(--bg);
+  padding: 1px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+}}
+.spacer {{ flex: 1; }}
+.hash {{
+  color: var(--text-muted);
+  font-size: 12px;
+  font-family: 'SF Mono', SFMono-Regular, Consolas, 'Liberation Mono', Menlo, monospace;
+}}
+</style>
+</head>
+<body>
+<h1>Manifest — Agent Activity Report</h1>
+<p class="subtitle">Generated {now} · {total} receipt(s)</p>
+
+<div class="stats">
+  <div class="stat">
+    <div class="stat-value">{total}</div>
+    <div class="stat-label">Receipts</div>
+  </div>
+  <div class="stat">
+    <div class="stat-value violations">{violation_count}</div>
+    <div class="stat-label">Violations</div>
+  </div>
+  <div class="stat">
+    <div class="stat-value">{tools}</div>
+    <div class="stat-label">Tools</div>
+  </div>
+  <div class="stat">
+    <div class="stat-value">{agents}</div>
+    <div class="stat-label">Agents</div>
+  </div>
+</div>
+"#,
+        now = now,
+        total = total,
+        violation_count = violation_count,
+        tools = tools.len(),
+        agents = agents.len(),
+    ));
+
+    // Receipts in chronological order (list_receipts returns newest first)
+    for receipt in receipts.iter().rev() {
+        let timestamp = receipt.timestamp.format("%Y-%m-%d %H:%M:%S");
+        let tool = escape_html(&receipt.action.tool);
+        let agent = escape_html(&receipt.agent.name);
+        let source = format!("{:?}", receipt.agent.source).to_lowercase();
+        let content_hash = receipt.content_hash();
+        let hash_short = truncate_hash(&content_hash, 24);
+
+        // Status badge
+        let (badge_class, badge_text) = if let Some(ref delta) = receipt.delta {
+            if !delta.violations.is_empty() {
+                ("badge-violation", "VIOLATION")
+            } else if delta.authorized {
+                ("badge-ok", "AUTHORIZED")
+            } else {
+                ("badge-denied", "DENIED")
+            }
+        } else {
+            ("badge-none", "NO POLICY")
+        };
+
+        html.push_str(&format!(
+            r#"<div class="receipt">
+  <div class="receipt-header">
+    <span class="time">{timestamp}</span>
+    <span class="tool">{tool}</span>
+    <span class="agent">{agent}</span>
+    <span class="source-badge">{source}</span>
+    <span class="badge {badge_class}">{badge_text}</span>
+    <span class="spacer"></span>
+    <span class="hash">{hash_short}</span>
+  </div>
+"#,
+        ));
+
+        // Violations
+        if let Some(ref delta) = receipt.delta {
+            if !delta.violations.is_empty() {
+                html.push_str("  <div class=\"violations-list\">\n");
+                for v in &delta.violations {
+                    html.push_str(&format!(
+                        "    <div class=\"violation-item\">{}</div>\n",
+                        escape_html(v)
+                    ));
+                }
+                html.push_str("  </div>\n");
+            }
+        }
+
+        // Error (if any)
+        if let Some(ref error) = receipt.action.error {
+            html.push_str(&format!(
+                r#"  <div class="detail-body">
+    <div class="error-box">
+      <div class="error-code">Error {code}</div>
+      <div class="error-msg">{message}</div>
+    </div>
+  </div>
+"#,
+                code = error.code,
+                message = escape_html(&error.message),
+            ));
+        }
+
+        // Input/Output details
+        let input_json = escape_html(
+            &serde_json::to_string_pretty(&receipt.action.input).unwrap_or_default(),
+        );
+        html.push_str(&format!(
+            r#"  <details>
+    <summary>Input</summary>
+    <div class="detail-body">
+      <pre>{input_json}</pre>
+    </div>
+  </details>
+"#,
+        ));
+
+        if let Some(ref output) = receipt.action.output {
+            let output_json =
+                escape_html(&serde_json::to_string_pretty(output).unwrap_or_default());
+            html.push_str(&format!(
+                r#"  <details>
+    <summary>Output</summary>
+    <div class="detail-body">
+      <pre>{output_json}</pre>
+    </div>
+  </details>
+"#,
+            ));
+        }
+
+        // Proof details
+        let sig_short = truncate_hash(&receipt.proof.signature, 32);
+        let merkle_short = truncate_hash(&receipt.proof.merkle_root, 32);
+        let prev = receipt
+            .proof
+            .previous_receipt
+            .as_deref()
+            .map(|h| truncate_hash(h, 32))
+            .unwrap_or_else(|| "—".to_string());
+
+        html.push_str(&format!(
+            r#"  <details>
+    <summary>Proof</summary>
+    <div class="detail-body">
+      <div class="proof-grid">
+        <span class="proof-label">signature</span>
+        <span class="proof-value">{sig}</span>
+        <span class="proof-label">merkle root</span>
+        <span class="proof-value">{merkle}</span>
+        <span class="proof-label">previous</span>
+        <span class="proof-value">{prev}</span>
+        <span class="proof-label">content hash</span>
+        <span class="proof-value">{hash}</span>
+      </div>
+    </div>
+  </details>
+"#,
+            sig = escape_html(&sig_short),
+            merkle = escape_html(&merkle_short),
+            prev = escape_html(&prev),
+            hash = escape_html(&content_hash),
+        ));
+
+        html.push_str("</div>\n\n");
+    }
+
+    // Footer
+    html.push_str(
+        r#"<div class="footer">
+  Generated by <strong>Manifest</strong> · Cryptographic receipts for AI agent tool calls<br>
+  <a href="https://github.com/port-authority/manifest">github.com/port-authority/manifest</a>
+</div>
+</body>
+</html>
+"#,
+    );
+
+    html
 }
