@@ -1,3 +1,4 @@
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::error::ManifestError;
@@ -34,6 +35,21 @@ pub enum PolicyRule {
 
     #[serde(rename = "pii-flag")]
     PiiFlag { flag_if_contains: Vec<String> },
+
+    /// Regex-based PII detection with built-in patterns.
+    ///
+    /// Supports custom regex patterns and/or built-in detectors for
+    /// common PII types: `ssn`, `credit_card`, `email`, `phone`.
+    #[serde(rename = "pii-regex")]
+    PiiRegex {
+        /// Built-in pattern names to enable (e.g., ["ssn", "credit_card", "email"]).
+        #[serde(default)]
+        builtin: Vec<String>,
+
+        /// Custom regex patterns with labels (e.g., {"passport": "\\b[A-Z]\\d{8}\\b"}).
+        #[serde(default)]
+        custom: std::collections::HashMap<String, String>,
+    },
 }
 
 impl PolicyConfig {
@@ -63,8 +79,8 @@ impl PolicyConfig {
                 PolicyRule::ToolAllowlist { allowed_tools } => {
                     allowed = Some(allowed_tools.clone());
                 }
-                PolicyRule::PiiFlag { .. } => {
-                    // PII flags don't appear in the snapshot — they're evaluated at check time
+                PolicyRule::PiiFlag { .. } | PolicyRule::PiiRegex { .. } => {
+                    // PII rules don't appear in the snapshot — they're evaluated at check time
                 }
             }
         }
@@ -139,6 +155,41 @@ impl PolicyConfig {
                         }
                     }
                 }
+                PolicyRule::PiiRegex { builtin, custom } => {
+                    let mut patterns: Vec<(String, Regex)> = Vec::new();
+
+                    // Load built-in patterns
+                    for name in builtin {
+                        if let Some(re) = builtin_pii_regex(name) {
+                            patterns.push((name.clone(), re));
+                        }
+                        // Unknown built-in names are silently skipped
+                    }
+
+                    // Load custom patterns
+                    for (label, pattern) in custom {
+                        if let Ok(re) = Regex::new(pattern) {
+                            patterns.push((label.clone(), re));
+                        }
+                        // Invalid regex patterns are silently skipped
+                    }
+
+                    let input_str = input.to_string();
+                    for (label, re) in &patterns {
+                        if re.is_match(&input_str) {
+                            violations.push(format!("pii_regex_match_in_input: '{label}'"));
+                        }
+                    }
+
+                    if let Some(out) = output {
+                        let output_str = out.to_string();
+                        for (label, re) in &patterns {
+                            if re.is_match(&output_str) {
+                                violations.push(format!("pii_regex_match_in_output: '{label}'"));
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -168,6 +219,24 @@ fn extract_numeric_values(value: &serde_json::Value) -> Vec<f64> {
         _ => {}
     }
     values
+}
+
+/// Get a built-in regex pattern for a named PII type.
+///
+/// Supported names:
+/// - `ssn` — US Social Security Number (XXX-XX-XXXX)
+/// - `credit_card` — Major credit card numbers (13-19 digits, common prefixes)
+/// - `email` — Email addresses
+/// - `phone` — US phone numbers (various formats)
+fn builtin_pii_regex(name: &str) -> Option<Regex> {
+    let pattern = match name {
+        "ssn" => r"\b\d{3}-\d{2}-\d{4}\b",
+        "credit_card" => r"\b(?:4\d{12}(?:\d{3})?|5[1-5]\d{14}|3[47]\d{13}|6(?:011|5\d{2})\d{12})\b",
+        "email" => r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b",
+        "phone" => r"\b(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b",
+        _ => return None,
+    };
+    Regex::new(pattern).ok()
 }
 
 #[cfg(test)]
@@ -351,6 +420,103 @@ policies:
         let input = serde_json::json!({"amount": 5000, "field": "ssn"});
         let violations = config.evaluate("transfer", &input, None);
         assert_eq!(violations.len(), 3);
+    }
+
+    #[test]
+    fn evaluate_pii_regex_ssn() {
+        let config = PolicyConfig {
+            policies: vec![PolicyRule::PiiRegex {
+                builtin: vec!["ssn".into()],
+                custom: std::collections::HashMap::new(),
+            }],
+        };
+
+        // Actual SSN format triggers
+        let input = serde_json::json!({"data": "SSN is 123-45-6789"});
+        let violations = config.evaluate("query", &input, None);
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].contains("pii_regex_match_in_input"));
+        assert!(violations[0].contains("ssn"));
+    }
+
+    #[test]
+    fn evaluate_pii_regex_no_false_positive() {
+        let config = PolicyConfig {
+            policies: vec![PolicyRule::PiiRegex {
+                builtin: vec!["ssn".into()],
+                custom: std::collections::HashMap::new(),
+            }],
+        };
+
+        // The word "assign" contains "ssn" as a substring but should NOT trigger
+        // the regex detector (unlike the naive string-match PiiFlag)
+        let input = serde_json::json!({"action": "assign task to user"});
+        let violations = config.evaluate("task", &input, None);
+        assert!(violations.is_empty(), "regex should not match 'assign'");
+    }
+
+    #[test]
+    fn evaluate_pii_regex_credit_card() {
+        let config = PolicyConfig {
+            policies: vec![PolicyRule::PiiRegex {
+                builtin: vec!["credit_card".into()],
+                custom: std::collections::HashMap::new(),
+            }],
+        };
+
+        let input = serde_json::json!({"card": "4111111111111111"});
+        let violations = config.evaluate("payment", &input, None);
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].contains("credit_card"));
+    }
+
+    #[test]
+    fn evaluate_pii_regex_email() {
+        let config = PolicyConfig {
+            policies: vec![PolicyRule::PiiRegex {
+                builtin: vec!["email".into()],
+                custom: std::collections::HashMap::new(),
+            }],
+        };
+
+        let output = serde_json::json!({"result": "Contact: user@example.com"});
+        let input = serde_json::json!({});
+        let violations = config.evaluate("query", &input, Some(&output));
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].contains("pii_regex_match_in_output"));
+    }
+
+    #[test]
+    fn evaluate_pii_regex_custom() {
+        let mut custom = std::collections::HashMap::new();
+        custom.insert("passport".into(), r"\b[A-Z]\d{8}\b".into());
+
+        let config = PolicyConfig {
+            policies: vec![PolicyRule::PiiRegex {
+                builtin: vec![],
+                custom,
+            }],
+        };
+
+        let input = serde_json::json!({"doc": "Passport: A12345678"});
+        let violations = config.evaluate("verify", &input, None);
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].contains("passport"));
+    }
+
+    #[test]
+    fn evaluate_pii_regex_phone() {
+        let config = PolicyConfig {
+            policies: vec![PolicyRule::PiiRegex {
+                builtin: vec!["phone".into()],
+                custom: std::collections::HashMap::new(),
+            }],
+        };
+
+        let input = serde_json::json!({"contact": "Call (555) 123-4567"});
+        let violations = config.evaluate("lookup", &input, None);
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].contains("phone"));
     }
 
     #[test]

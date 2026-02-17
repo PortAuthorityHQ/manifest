@@ -93,6 +93,33 @@ enum Commands {
         db: Option<String>,
     },
 
+    /// Start the HTTP proxy for remote MCP servers (Streamable HTTP transport)
+    ProxyHttp {
+        /// Upstream MCP server URL (e.g., http://localhost:9090/mcp)
+        #[arg(long)]
+        upstream: String,
+
+        /// Port to listen on
+        #[arg(long, default_value = "8080")]
+        port: u16,
+
+        /// Path to identity config file
+        #[arg(long)]
+        identity: Option<String>,
+
+        /// Path to policy config file
+        #[arg(long)]
+        policy: Option<String>,
+
+        /// Path to the signing key (generated if absent)
+        #[arg(long)]
+        key: Option<String>,
+
+        /// Path to the SQLite database
+        #[arg(long)]
+        db: Option<String>,
+    },
+
     /// Generate a new signing keypair
     Init {
         /// Path to store the keypair
@@ -133,6 +160,16 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Verify { hash, public_key, db } => {
             commands::verify::run(&hash, &public_key, db.as_deref())?;
+        }
+        Commands::ProxyHttp { upstream, port, identity, policy, key, db } => {
+            commands::proxy_http::run(
+                &upstream,
+                port,
+                identity.as_deref(),
+                policy.as_deref(),
+                key.as_deref(),
+                db.as_deref(),
+            ).await?;
         }
         Commands::Init { key } => {
             commands::init::run(key.as_deref())?;

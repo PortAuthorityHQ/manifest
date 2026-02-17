@@ -1,4 +1,5 @@
 pub mod child;
+pub mod http_relay;
 pub mod jsonrpc;
 pub mod mcp;
 pub mod pending;

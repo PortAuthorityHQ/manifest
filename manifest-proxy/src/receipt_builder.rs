@@ -112,10 +112,16 @@ fn process_captured_call(
         store.latest_receipt_hash()?
     };
 
+    // Truncate oversized outputs to prevent receipt bloat.
+    // If the serialized output exceeds the threshold, replace it with a
+    // hash reference so the receipt stays small but verifiable.
+    let output = truncate_if_oversized(captured.output);
+    let input = truncate_if_oversized(Some(captured.input)).unwrap_or_default();
+
     let action = Action {
         tool: captured.tool_name.clone(),
-        input: captured.input,
-        output: captured.output,
+        input,
+        output,
         error: captured.error,
     };
 
@@ -167,4 +173,49 @@ fn process_captured_call(
     );
 
     Ok(())
+}
+
+/// Maximum serialized size (in bytes) for input/output before truncation.
+///
+/// Payloads larger than this are replaced with a hash reference.
+/// Default: 256 KB. Can be overridden via `MANIFEST_MAX_PAYLOAD_BYTES`.
+fn max_payload_bytes() -> usize {
+    std::env::var("MANIFEST_MAX_PAYLOAD_BYTES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(256 * 1024)
+}
+
+/// Replace an oversized JSON value with a compact hash reference.
+///
+/// If the serialized form exceeds `max_payload_bytes()`, returns:
+/// ```json
+/// {
+///   "_truncated": true,
+///   "_original_hash": "sha256:abcdef...",
+///   "_original_bytes": 524288
+/// }
+/// ```
+fn truncate_if_oversized(value: Option<serde_json::Value>) -> Option<serde_json::Value> {
+    let value = value?;
+    let serialized = serde_json::to_vec(&value).unwrap_or_default();
+    let max = max_payload_bytes();
+
+    if serialized.len() <= max {
+        return Some(value);
+    }
+
+    let hash = manifest_core::sha256_hex(&serialized);
+    tracing::warn!(
+        bytes = serialized.len(),
+        max_bytes = max,
+        hash = %hash,
+        "payload truncated — exceeds size limit"
+    );
+
+    Some(serde_json::json!({
+        "_truncated": true,
+        "_original_hash": hash,
+        "_original_bytes": serialized.len(),
+    }))
 }

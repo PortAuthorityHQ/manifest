@@ -247,6 +247,23 @@ policies:
 manifest proxy --server "your-server" --policy manifest.policy.yml
 ```
 
+The `pii-regex` rule provides built-in patterns for common PII types and supports custom regex:
+
+```yaml
+# manifest.policy.yml
+policies:
+  - name: pii-regex
+    builtin:
+      - ssn           # US Social Security Numbers (XXX-XX-XXXX)
+      - credit_card   # Major credit card numbers
+      - email         # Email addresses
+      - phone         # US phone numbers
+    custom:
+      passport: '\b[A-Z]\d{8}\b'
+```
+
+The simpler `pii-flag` rule uses case-insensitive substring matching (faster, but prone to false positives like "assign" matching "ssn"). Use `pii-regex` when precision matters.
+
 Full OPA/Rego integration is on the roadmap for enterprise use cases.
 
 ## Use Cases
@@ -258,6 +275,33 @@ Full OPA/Rego integration is on the roadmap for enterprise use cases.
 **Insurance** — Insurers are adding AI exclusions to E&O and D&O policies. Receipts become your proof that controls are operational, not theoretical.
 
 **Debugging** — When an agent loops, burns credits, or hallucinates tool parameters, the receipt chain gives you the exact trace with cryptographic ordering.
+
+## HTTP/SSE Transport
+
+For remote MCP servers using the Streamable HTTP transport, use `proxy-http` instead of `proxy`:
+
+```bash
+# Proxy a remote MCP server
+manifest proxy-http --upstream http://localhost:9090/mcp --port 8080
+
+# With policy and identity
+manifest proxy-http --upstream http://mcp.example.com/mcp --port 8080 \
+    --policy manifest.policy.yml --identity manifest.identity.yml
+```
+
+Then point your agent at `http://localhost:8080/mcp` instead of the upstream server. The proxy handles POST, GET (SSE), and DELETE methods transparently.
+
+## Known Limitations
+
+**Spending limits check all numeric values.** The spending limit policy scans every numeric value in the JSON input recursively. A tool call like `{"page": 50000, "limit": 100}` would trigger a violation for the pagination parameter. There is no way to specify which field represents monetary value — all numbers are checked.
+
+**PII string matching has false positives.** The `pii-flag` rule uses case-insensitive substring matching, so "assign" matches "ssn". Use the `pii-regex` rule for precise pattern matching when this is a concern.
+
+**Single-writer SQLite.** The `Arc<Mutex<Storage>>` pattern works for a single proxy instance. Running two proxy instances pointing at the same database file will cause lock contention. Use separate database files for concurrent proxies.
+
+**Receipt payload truncation.** Tool outputs larger than 256 KB (configurable via `MANIFEST_MAX_PAYLOAD_BYTES`) are replaced with a SHA-256 hash reference in the receipt. The original payload is not stored — only its hash. This prevents SQLite bloat but means large outputs cannot be fully reconstructed from receipts alone.
+
+**Identity is self-declared.** In the open-source version, agent identity comes from the MCP handshake, a config file, or the environment. None of these sources are cryptographically verified (`"verified": false`). An agent can claim to be anything.
 
 ## What This Does NOT Capture
 
@@ -272,9 +316,10 @@ This is still more than any enterprise currently has.
 - [x] CLI tooling (`log`, `inspect`, `export`)
 - [x] Agent identity (auto-detect from MCP handshake + config file + environment)
 - [x] YAML policy engine (tool allowlists, spending limit schema)
-- [x] Policy evaluation (spending limit enforcement, PII detection)
+- [x] Policy evaluation (spending limit enforcement, PII detection, regex patterns)
 - [x] Receipt verification (`manifest verify` — signature, hash, Merkle proof, chain)
-- [ ] HTTP/SSE MCP transport support
+- [x] HTTP/SSE MCP transport (`manifest proxy-http` — Streamable HTTP reverse proxy)
+- [x] Receipt size limits (auto-truncation of oversized payloads with hash reference)
 - [ ] REST API interception (requires per-API config)
 - [ ] OPA/Rego policy integration
 - [ ] Dashboard UI

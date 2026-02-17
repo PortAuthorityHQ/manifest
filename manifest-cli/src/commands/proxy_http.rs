@@ -4,18 +4,18 @@ use std::time::Duration;
 use manifest_core::{
     AgentIdentity, ManifestError, MerkleTree, PolicyConfig, Signer, Storage,
 };
-use manifest_proxy::child::ChildProcess;
+use manifest_proxy::http_relay::{build_router, HttpProxyState};
+use manifest_proxy::pending::PendingCallMap;
 use manifest_proxy::receipt_builder::receipt_worker;
-use manifest_proxy::relay::run_relay;
 use manifest_proxy::session::McpSession;
-use tokio::io::BufReader;
 use tokio::sync::mpsc;
 
 use crate::commands::init::{resolve_db_path, resolve_key_path};
 
-/// Start the proxy, wrapping an MCP server.
+/// Start the HTTP reverse proxy for remote MCP servers.
 pub async fn run(
-    server_cmd: &str,
+    upstream_url: &str,
+    port: u16,
     identity_path: Option<&str>,
     policy_path: Option<&str>,
     key_path: Option<&str>,
@@ -40,7 +40,7 @@ pub async fn run(
     tracing::info!(path = %db_file.display(), "opening receipt database");
     let storage = Storage::open(&db_file)?;
 
-    // Restore Merkle tree from stored leaves
+    // Restore Merkle tree
     let leaves = storage.load_merkle_leaves()?;
     let merkle = MerkleTree::from_leaves(leaves);
     tracing::info!(leaves = merkle.len(), "restored Merkle tree");
@@ -68,60 +68,61 @@ pub async fn run(
         None => None,
     };
 
-    // Create session
+    // Create session and receipt channel
     let session = Arc::new(Mutex::new(McpSession::new(identity, policy)));
-
-    // Spawn child process
-    tracing::info!(command = %server_cmd, "spawning MCP server");
-    let (child, child_stdio) = ChildProcess::spawn(server_cmd).await?;
-
-    // Receipt channel — unbounded so it never back-pressures the relay
     let (receipt_tx, receipt_rx) = mpsc::unbounded_channel();
 
-    // Start the background receipt worker
-    let worker_session = session.clone();
-    let worker_signer = signer.clone();
-    let worker_merkle = merkle.clone();
-    let worker_storage = storage.clone();
-    let worker_handle = tokio::spawn(async move {
-        receipt_worker(receipt_rx, worker_session, worker_signer, worker_merkle, worker_storage).await;
+    // Start background receipt worker
+    let worker_handle = tokio::spawn({
+        let session = session.clone();
+        let signer = signer.clone();
+        let merkle = merkle.clone();
+        let storage = storage.clone();
+        async move {
+            receipt_worker(receipt_rx, session, signer, merkle, storage).await;
+        }
     });
 
-    // Run the relay (blocks until agent or child disconnects)
-    let agent_reader = BufReader::new(tokio::io::stdin());
-    let agent_writer = tokio::io::stdout();
-
-    let result = run_relay(
-        agent_reader,
-        agent_writer,
-        child_stdio.stdin,
-        child_stdio.stdout,
+    // Build the HTTP proxy
+    let state = HttpProxyState {
+        upstream_url: upstream_url.to_string(),
+        client: reqwest::Client::new(),
         session,
+        pending: Arc::new(Mutex::new(PendingCallMap::new())),
         receipt_tx,
-    )
-    .await;
+    };
 
-    // receipt_tx was moved into run_relay and is now dropped, which closes the
-    // channel. The receipt worker will drain any remaining items and then exit.
-    // We await it with a timeout to guarantee we don't hang forever.
+    let app = build_router(state);
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+
+    eprintln!("Manifest HTTP proxy listening on http://{addr}");
+    eprintln!("Upstream MCP server: {upstream_url}");
+
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .map_err(|e| ManifestError::Config(format!("failed to bind {addr}: {e}")))?;
+
+    // Run the server — blocks until shutdown signal
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .map_err(|e| ManifestError::Config(format!("server error: {e}")))?;
+
+    // Wait for receipt worker to drain
     tracing::debug!("waiting for receipt worker to drain");
     match tokio::time::timeout(Duration::from_secs(10), worker_handle).await {
-        Ok(Ok(())) => {
-            tracing::debug!("receipt worker drained successfully");
-        }
-        Ok(Err(e)) => {
-            tracing::warn!(error = %e, "receipt worker task panicked");
-        }
-        Err(_) => {
-            tracing::warn!("receipt worker did not drain within 10s, shutting down anyway");
-        }
+        Ok(Ok(())) => tracing::debug!("receipt worker drained"),
+        Ok(Err(e)) => tracing::warn!(error = %e, "receipt worker panicked"),
+        Err(_) => tracing::warn!("receipt worker drain timeout"),
     }
 
-    // Shutdown child gracefully
-    tracing::info!("shutting down MCP server");
-    if let Err(e) = child.shutdown(Duration::from_secs(5)).await {
-        tracing::warn!(error = %e, "error during child shutdown");
-    }
+    Ok(())
+}
 
-    result
+/// Wait for Ctrl+C to initiate graceful shutdown.
+async fn shutdown_signal() {
+    tokio::signal::ctrl_c()
+        .await
+        .expect("failed to install Ctrl+C handler");
+    tracing::info!("shutdown signal received");
 }
