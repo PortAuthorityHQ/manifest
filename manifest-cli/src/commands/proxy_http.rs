@@ -5,7 +5,7 @@ use manifest_core::{
     AgentIdentity, ManifestError, MerkleTree, PolicyConfig, Signer, Storage,
 };
 use manifest_proxy::http_relay::{build_router, spawn_session_reaper, HttpProxyState};
-use manifest_proxy::receipt_builder::receipt_worker;
+use manifest_proxy::receipt_builder::{receipt_worker, AlertConfig};
 use manifest_proxy::session::McpSession;
 use tokio::sync::mpsc;
 
@@ -21,6 +21,7 @@ pub async fn run(
     db_path: Option<&str>,
     auth_token: Option<&str>,
     rate_limit: Option<u64>,
+    webhook_url: Option<&str>,
 ) -> Result<(), ManifestError> {
     let key_file = resolve_key_path(key_path);
     let db_file = resolve_db_path(db_path);
@@ -75,12 +76,13 @@ pub async fn run(
     let (receipt_tx, receipt_rx) = mpsc::unbounded_channel();
 
     // Start background receipt worker
+    let alerts = AlertConfig::new(webhook_url.map(|s| s.to_string()));
     let worker_handle = tokio::spawn({
         let signer = signer.clone();
         let merkle = merkle.clone();
         let storage = storage.clone();
         async move {
-            receipt_worker(receipt_rx, dummy_session, signer, merkle, storage).await;
+            receipt_worker(receipt_rx, dummy_session, signer, merkle, storage, alerts).await;
         }
     });
 

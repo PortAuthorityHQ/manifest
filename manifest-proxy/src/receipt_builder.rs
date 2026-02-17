@@ -8,6 +8,26 @@ use tokio::sync::mpsc;
 
 use crate::session::McpSession;
 
+/// Configuration for real-time violation alerts.
+#[derive(Clone)]
+pub struct AlertConfig {
+    /// Optional webhook URL to POST violation details to.
+    pub webhook_url: Option<String>,
+    /// HTTP client for webhook calls (reused across alerts).
+    client: Option<reqwest::Client>,
+}
+
+impl AlertConfig {
+    pub fn new(webhook_url: Option<String>) -> Self {
+        let client = webhook_url.as_ref().map(|_| reqwest::Client::new());
+        Self { webhook_url, client }
+    }
+
+    pub fn none() -> Self {
+        Self { webhook_url: None, client: None }
+    }
+}
+
 /// Pre-extracted session state carried with each captured tool call.
 ///
 /// For stdio, this is extracted from the single session. For HTTP,
@@ -74,6 +94,7 @@ pub async fn receipt_worker(
     signer: Arc<Signer>,
     merkle: Arc<Mutex<MerkleTree>>,
     storage: Arc<Mutex<Storage>>,
+    alerts: AlertConfig,
 ) {
     while let Some(mut captured) = rx.recv().await {
         // Use pre-extracted session info if available (HTTP mode),
@@ -98,6 +119,19 @@ pub async fn receipt_worker(
             (info.identity, info.policy_snapshot, info.session_id, info.delta)
         };
 
+        // Emit real-time alerts for policy violations
+        if let Some(ref delta) = session_state.3 {
+            if !delta.violations.is_empty() {
+                emit_violation_alert(
+                    &captured.tool_name,
+                    &session_state.0.name,
+                    &delta.violations,
+                    &alerts,
+                )
+                .await;
+            }
+        }
+
         // Offload signing + hashing + SQLite writes to a blocking thread
         let signer = signer.clone();
         let merkle = merkle.clone();
@@ -121,6 +155,52 @@ pub async fn receipt_worker(
     }
 
     tracing::debug!("receipt worker shutting down");
+}
+
+/// Emit a real-time alert for policy violations.
+///
+/// Always logs to stderr via tracing. Optionally sends a webhook POST.
+async fn emit_violation_alert(
+    tool_name: &str,
+    agent_name: &str,
+    violations: &[String],
+    alerts: &AlertConfig,
+) {
+    // Always emit to stderr
+    for v in violations {
+        tracing::warn!(
+            tool = %tool_name,
+            agent = %agent_name,
+            violation = %v,
+            "POLICY VIOLATION"
+        );
+    }
+
+    // Fire webhook if configured
+    if let (Some(ref url), Some(ref client)) = (&alerts.webhook_url, &alerts.client) {
+        let payload = serde_json::json!({
+            "event": "policy_violation",
+            "timestamp": Utc::now().to_rfc3339(),
+            "tool": tool_name,
+            "agent": agent_name,
+            "violations": violations,
+        });
+
+        match client.post(url).json(&payload).send().await {
+            Ok(resp) => {
+                tracing::debug!(
+                    status = %resp.status(),
+                    "violation webhook sent"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "failed to send violation webhook"
+                );
+            }
+        }
+    }
 }
 
 type SessionState = (

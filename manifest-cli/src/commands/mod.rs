@@ -6,3 +6,4 @@ pub mod proxy;
 pub mod proxy_http;
 pub mod prune;
 pub mod verify;
+pub mod watch;

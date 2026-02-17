@@ -58,6 +58,8 @@ cargo test -p manifest-proxy   # Test just proxy
 | E2E test (stdio) | `tests/e2e.sh` |
 | E2E test (HTTP) | `tests/e2e_http.sh` |
 | Prune command | `manifest-cli/src/commands/prune.rs` |
+| Watch command | `manifest-cli/src/commands/watch.rs` |
+| Alert config | `manifest-proxy/src/receipt_builder.rs` (AlertConfig, emit_violation_alert) |
 
 ## Conventions
 
@@ -84,3 +86,5 @@ cargo test -p manifest-proxy   # Test just proxy
 - HTTP sessions have a 30-minute idle TTL (configurable via `MANIFEST_SESSION_TTL_SECS` env var). A background reaper task evicts expired sessions every 60 seconds. DELETE requests also clean up sessions immediately.
 - Rate limiting uses a token bucket in `http_relay.rs` (not tower). The `RateLimiter` struct is behind `Arc<Mutex>` and shared across all requests.
 - `/health` endpoint is NOT behind auth middleware — it's always accessible for load balancer probes.
+- `--webhook` flag on proxy/proxy-http sends violation alerts as JSON POST to the configured URL. Violations are always logged to stderr regardless.
+- `manifest watch` polls the database every 500ms. It only shows receipts created after the command starts (not historical). Uses color-coded status output (ANSI escape codes).

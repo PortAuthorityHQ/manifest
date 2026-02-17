@@ -33,6 +33,10 @@ enum Commands {
         /// Path to the SQLite database
         #[arg(long)]
         db: Option<String>,
+
+        /// Webhook URL for real-time policy violation alerts
+        #[arg(long)]
+        webhook: Option<String>,
     },
 
     /// View recent receipts
@@ -126,6 +130,10 @@ enum Commands {
         /// Rate limit in requests per second (excess requests get 503)
         #[arg(long)]
         rate_limit: Option<u64>,
+
+        /// Webhook URL for real-time policy violation alerts
+        #[arg(long)]
+        webhook: Option<String>,
     },
 
     /// Generate a new signing keypair
@@ -133,6 +141,21 @@ enum Commands {
         /// Path to store the keypair
         #[arg(long)]
         key: Option<String>,
+    },
+
+    /// Live-tail receipts as they are generated
+    Watch {
+        /// Filter by tool name
+        #[arg(long)]
+        tool: Option<String>,
+
+        /// Filter by session ID
+        #[arg(long)]
+        session: Option<String>,
+
+        /// Path to the SQLite database
+        #[arg(long)]
+        db: Option<String>,
     },
 
     /// Delete receipts older than a given duration
@@ -163,13 +186,14 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Proxy { server, identity, policy, key, db } => {
+        Commands::Proxy { server, identity, policy, key, db, webhook } => {
             commands::proxy::run(
                 &server,
                 identity.as_deref(),
                 policy.as_deref(),
                 key.as_deref(),
                 db.as_deref(),
+                webhook.as_deref(),
             ).await?;
         }
         Commands::Log { tail, session, db } => {
@@ -184,7 +208,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Verify { hash, public_key, db } => {
             commands::verify::run(&hash, &public_key, db.as_deref())?;
         }
-        Commands::ProxyHttp { upstream, port, identity, policy, key, db, token, rate_limit } => {
+        Commands::ProxyHttp { upstream, port, identity, policy, key, db, token, rate_limit, webhook } => {
             commands::proxy_http::run(
                 &upstream,
                 port,
@@ -194,10 +218,18 @@ async fn main() -> anyhow::Result<()> {
                 db.as_deref(),
                 token.as_deref(),
                 rate_limit,
+                webhook.as_deref(),
             ).await?;
         }
         Commands::Init { key } => {
             commands::init::run(key.as_deref())?;
+        }
+        Commands::Watch { tool, session, db } => {
+            commands::watch::run(
+                tool.as_deref(),
+                session.as_deref(),
+                db.as_deref(),
+            ).await?;
         }
         Commands::Prune { older_than, dry_run, db } => {
             commands::prune::run(&older_than, dry_run, db.as_deref())?;

@@ -76,6 +76,10 @@ manifest proxy --server "npx @modelcontextprotocol/server-postgres postgresql://
 
 # Wrap any MCP server
 manifest proxy --server "your-mcp-server-command"
+
+# With real-time violation alerts via webhook
+manifest proxy --server "your-mcp-server-command" --policy manifest.policy.yml \
+    --webhook https://hooks.slack.com/services/...
 ```
 
 Point your agent's MCP client config at `manifest` instead of the server directly:
@@ -113,6 +117,13 @@ manifest prune --older-than 90d
 
 # Dry run — see what would be deleted without deleting
 manifest prune --older-than 30d --dry-run
+
+# Live-tail receipts as they are generated
+manifest watch
+
+# Filter by tool name or session
+manifest watch --tool db_query
+manifest watch --session <session-id>
 ```
 
 ## The Receipt
@@ -302,6 +313,7 @@ Then point your agent at `http://localhost:8080/mcp` instead of the upstream ser
 
 Additional options:
 
+- `--webhook <URL>` — POST policy violation alerts to a webhook (Slack, PagerDuty, etc.)
 - `--rate-limit 100` — Limit to 100 requests per second (excess gets 429)
 - A `/health` endpoint returns `{"status":"ok"}` for load balancer probes
 
@@ -369,6 +381,8 @@ This is still more than any enterprise currently has.
 - [x] Receipt size limits (auto-truncation of oversized payloads with hash reference)
 - [x] HTTP proxy authentication (bearer token + per-session state isolation)
 - [x] Database retention (`manifest prune --older-than 90d`)
+- [x] Real-time violation alerts (`--webhook` + stderr logging)
+- [x] Live receipt tailing (`manifest watch`)
 - [ ] REST API interception (requires per-API config)
 - [ ] OPA/Rego policy integration
 - [ ] Dashboard UI
