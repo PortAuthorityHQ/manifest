@@ -122,6 +122,10 @@ enum Commands {
         /// Bearer token for authentication (rejects unauthenticated requests)
         #[arg(long)]
         token: Option<String>,
+
+        /// Rate limit in requests per second (excess requests get 503)
+        #[arg(long)]
+        rate_limit: Option<u64>,
     },
 
     /// Generate a new signing keypair
@@ -180,7 +184,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Verify { hash, public_key, db } => {
             commands::verify::run(&hash, &public_key, db.as_deref())?;
         }
-        Commands::ProxyHttp { upstream, port, identity, policy, key, db, token } => {
+        Commands::ProxyHttp { upstream, port, identity, policy, key, db, token, rate_limit } => {
             commands::proxy_http::run(
                 &upstream,
                 port,
@@ -189,6 +193,7 @@ async fn main() -> anyhow::Result<()> {
                 key.as_deref(),
                 db.as_deref(),
                 token.as_deref(),
+                rate_limit,
             ).await?;
         }
         Commands::Init { key } => {

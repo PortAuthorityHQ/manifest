@@ -11,6 +11,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use axum::body::Body;
 use axum::extract::State;
@@ -28,10 +29,55 @@ use crate::receipt_builder::{extract_session_info, CapturedToolCall};
 use crate::session::McpSession;
 use manifest_core::{AgentIdentity, PolicyConfig};
 
+/// Simple token bucket rate limiter.
+struct RateLimiter {
+    tokens: Mutex<f64>,
+    max_tokens: f64,
+    refill_rate: f64, // tokens per second
+    last_refill: Mutex<Instant>,
+}
+
+impl RateLimiter {
+    fn new(requests_per_second: u64) -> Self {
+        let rps = requests_per_second as f64;
+        Self {
+            tokens: Mutex::new(rps),
+            max_tokens: rps,
+            refill_rate: rps,
+            last_refill: Mutex::new(Instant::now()),
+        }
+    }
+
+    /// Try to acquire a token. Returns true if allowed, false if rate limited.
+    fn try_acquire(&self) -> bool {
+        let mut tokens = self.tokens.lock().unwrap();
+        let mut last = self.last_refill.lock().unwrap();
+
+        let now = Instant::now();
+        let elapsed = now.duration_since(*last).as_secs_f64();
+        *tokens = (*tokens + elapsed * self.refill_rate).min(self.max_tokens);
+        *last = now;
+
+        if *tokens >= 1.0 {
+            *tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// Default session TTL: 30 minutes of inactivity.
+const DEFAULT_SESSION_TTL_SECS: u64 = 30 * 60;
+
+/// How often the reaper checks for expired sessions.
+const REAPER_INTERVAL_SECS: u64 = 60;
+
 /// Per-session state, keyed by `Mcp-Session-Id` from the upstream server.
 struct PerSessionState {
     session: McpSession,
     pending: PendingCallMap,
+    last_accessed: Instant,
 }
 
 /// Shared state for the HTTP proxy handlers.
@@ -52,6 +98,11 @@ pub struct HttpProxyState {
     /// Optional bearer token for authentication. If set, all requests must
     /// include `Authorization: Bearer <token>` or receive 401.
     pub auth_token: Option<String>,
+    /// Optional rate limit (requests per second). If set, excess requests
+    /// receive 429 Too Many Requests.
+    pub rate_limit: Option<u64>,
+    /// Token bucket for rate limiting. Shared across all requests.
+    rate_limiter: Option<Arc<RateLimiter>>,
 }
 
 impl HttpProxyState {
@@ -62,7 +113,9 @@ impl HttpProxyState {
         policy_config: Option<PolicyConfig>,
         receipt_tx: mpsc::UnboundedSender<CapturedToolCall>,
         auth_token: Option<String>,
+        rate_limit: Option<u64>,
     ) -> Self {
+        let rate_limiter = rate_limit.map(|rps| Arc::new(RateLimiter::new(rps)));
         Self {
             upstream_url,
             client: reqwest::Client::new(),
@@ -71,6 +124,8 @@ impl HttpProxyState {
             policy_config,
             receipt_tx,
             auth_token,
+            rate_limit,
+            rate_limiter,
         }
     }
 
@@ -79,7 +134,9 @@ impl HttpProxyState {
     /// that don't send `Mcp-Session-Id` headers.
     fn get_or_create_session(&self, session_id: &str) {
         let mut sessions = self.sessions.lock().unwrap();
-        if !sessions.contains_key(session_id) {
+        if let Some(s) = sessions.get_mut(session_id) {
+            s.last_accessed = Instant::now();
+        } else {
             sessions.insert(
                 session_id.to_string(),
                 PerSessionState {
@@ -88,11 +145,49 @@ impl HttpProxyState {
                         self.policy_config.clone(),
                     ),
                     pending: PendingCallMap::new(),
+                    last_accessed: Instant::now(),
                 },
             );
             tracing::debug!(session_id = %session_id, "created new per-session state");
         }
     }
+
+    /// Evict sessions that haven't been accessed within the TTL.
+    fn evict_expired(&self, ttl: Duration) {
+        let mut sessions = self.sessions.lock().unwrap();
+        let before = sessions.len();
+        sessions.retain(|id, s| {
+            let alive = s.last_accessed.elapsed() < ttl;
+            if !alive {
+                tracing::info!(session_id = %id, "evicting expired session");
+            }
+            alive
+        });
+        let evicted = before - sessions.len();
+        if evicted > 0 {
+            tracing::info!(evicted, remaining = sessions.len(), "session eviction complete");
+        }
+    }
+}
+
+/// Spawn a background task that periodically evicts expired sessions.
+///
+/// Returns a `JoinHandle` that runs until the proxy shuts down.
+pub fn spawn_session_reaper(state: HttpProxyState) -> tokio::task::JoinHandle<()> {
+    let ttl = Duration::from_secs(
+        std::env::var("MANIFEST_SESSION_TTL_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(DEFAULT_SESSION_TTL_SECS),
+    );
+
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(REAPER_INTERVAL_SECS));
+        loop {
+            interval.tick().await;
+            state.evict_expired(ttl);
+        }
+    })
 }
 
 /// Build the Axum router for the HTTP proxy.
@@ -101,25 +196,47 @@ impl HttpProxyState {
 /// The proxy forwards requests to the upstream server, intercepting
 /// JSON-RPC messages for receipt generation along the way.
 pub fn build_router(state: HttpProxyState) -> Router {
-    let router = Router::new()
-        .route(
-            "/mcp",
-            axum::routing::post(handle_post)
-                .get(handle_get)
-                .delete(handle_delete),
-        );
+    let mcp_routes = Router::new().route(
+        "/mcp",
+        axum::routing::post(handle_post)
+            .get(handle_get)
+            .delete(handle_delete),
+    );
 
-    // Add auth middleware if a token is configured
-    if state.auth_token.is_some() {
-        router
-            .layer(axum::middleware::from_fn_with_state(
-                state.clone(),
-                auth_middleware,
-            ))
-            .with_state(state)
+    // Add auth middleware to MCP routes only (not health check)
+    let mcp_routes = if state.auth_token.is_some() {
+        mcp_routes.layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware,
+        ))
     } else {
-        router.with_state(state)
-    }
+        mcp_routes
+    };
+
+    // Add rate limiting middleware if configured
+    let mcp_routes = if state.rate_limit.is_some() {
+        mcp_routes.layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            rate_limit_middleware,
+        ))
+    } else {
+        mcp_routes
+    };
+
+    mcp_routes
+        .route("/health", axum::routing::get(handle_health))
+        .with_state(state)
+}
+
+/// Health check endpoint. Returns 200 OK for load balancers and readiness probes.
+async fn handle_health(State(state): State<HttpProxyState>) -> Response {
+    let session_count = state.sessions.lock().map(|s| s.len()).unwrap_or(0);
+    let body = serde_json::json!({
+        "status": "ok",
+        "upstream": state.upstream_url,
+        "active_sessions": session_count,
+    });
+    (StatusCode::OK, axum::Json(body)).into_response()
 }
 
 /// Middleware that validates the Bearer token on every request.
@@ -143,6 +260,24 @@ async fn auth_middleware(
         Some(token) if token == expected => next.run(request).await,
         _ => (StatusCode::UNAUTHORIZED, "missing or invalid bearer token").into_response(),
     }
+}
+
+/// Middleware that enforces the request rate limit.
+async fn rate_limit_middleware(
+    State(state): State<HttpProxyState>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    if let Some(ref limiter) = state.rate_limiter {
+        if !limiter.try_acquire() {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                "rate limit exceeded",
+            )
+                .into_response();
+        }
+    }
+    next.run(request).await
 }
 
 /// Extract the `Mcp-Session-Id` from headers, defaulting to empty string.
@@ -351,6 +486,7 @@ async fn handle_delete(
     State(state): State<HttpProxyState>,
     headers: HeaderMap,
 ) -> Response {
+    let session_id = extract_session_id(&headers);
     let mut upstream_req = state.client.delete(&state.upstream_url);
 
     if let Some(sid) = headers.get("mcp-session-id") {
@@ -360,7 +496,13 @@ async fn handle_delete(
     match upstream_req.send().await {
         Ok(resp) => {
             let status = resp.status();
-            tracing::info!(%status, "session terminated via DELETE");
+            // Clean up session state on successful termination
+            if !session_id.is_empty() {
+                if let Ok(mut sessions) = state.sessions.lock() {
+                    sessions.remove(&session_id);
+                }
+            }
+            tracing::info!(%status, session_id = %session_id, "session terminated via DELETE");
             StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::OK).into_response()
         }
         Err(e) => {

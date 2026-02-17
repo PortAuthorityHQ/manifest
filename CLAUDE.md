@@ -81,3 +81,6 @@ cargo test -p manifest-proxy   # Test just proxy
 - Regex patterns in `PolicyConfig` are compiled once via `OnceLock` and cached. Don't construct `PolicyConfig` with struct literal — use `PolicyConfig::new(vec![...])` to ensure the cache field is initialized.
 - `manifest prune` deletes receipts but NOT Merkle leaves — the Merkle tree is append-only by design.
 - HTTP proxy bearer token auth (`--token`) is middleware-based. When set, all requests need `Authorization: Bearer <token>` or get 401.
+- HTTP sessions have a 30-minute idle TTL (configurable via `MANIFEST_SESSION_TTL_SECS` env var). A background reaper task evicts expired sessions every 60 seconds. DELETE requests also clean up sessions immediately.
+- Rate limiting uses a token bucket in `http_relay.rs` (not tower). The `RateLimiter` struct is behind `Arc<Mutex>` and shared across all requests.
+- `/health` endpoint is NOT behind auth middleware — it's always accessible for load balancer probes.

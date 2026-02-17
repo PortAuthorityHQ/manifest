@@ -96,6 +96,15 @@ else
     cat "$TEST_DIR/proxy_stderr.log"
     exit 1
 fi
+
+# Test health endpoint
+HEALTH_RESP=$(curl -s "http://127.0.0.1:$PROXY_PORT/health")
+if echo "$HEALTH_RESP" | grep -q '"status":"ok"'; then
+    echo "    PASS: Health endpoint responding"
+else
+    echo "    FAIL: Health endpoint not responding"
+    echo "    Got: $HEALTH_RESP"
+fi
 echo ""
 
 # ── Step 4: Send tool calls via HTTP ────────────────────────────────────────

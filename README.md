@@ -300,6 +300,40 @@ manifest proxy-http --upstream http://localhost:9090/mcp --port 8080 --token my-
 
 Then point your agent at `http://localhost:8080/mcp` instead of the upstream server. The proxy handles POST, GET (SSE), and DELETE methods transparently. When `--token` is set, all requests must include `Authorization: Bearer <token>` or receive a 401 response. Each concurrent client gets isolated session state via the `Mcp-Session-Id` header.
 
+Additional options:
+
+- `--rate-limit 100` — Limit to 100 requests per second (excess gets 429)
+- A `/health` endpoint returns `{"status":"ok"}` for load balancer probes
+
+### Deploying with TLS
+
+The HTTP proxy serves plaintext on `127.0.0.1`. For network deployments, use a reverse proxy to terminate TLS:
+
+**Caddy** (automatic HTTPS):
+```
+mcp.example.com {
+    reverse_proxy localhost:8080
+}
+```
+
+**nginx**:
+```nginx
+server {
+    listen 443 ssl;
+    server_name mcp.example.com;
+
+    ssl_certificate     /etc/ssl/certs/mcp.example.com.pem;
+    ssl_certificate_key /etc/ssl/private/mcp.example.com.key;
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_buffering off;  # Required for SSE streaming
+    }
+}
+```
+
 ## Known Limitations
 
 **Spending limits check all numeric values.** The spending limit policy scans every numeric value in the JSON input recursively. A tool call like `{"page": 50000, "limit": 100}` would trigger a violation for the pagination parameter. There is no way to specify which field represents monetary value — all numbers are checked.
@@ -311,6 +345,10 @@ Then point your agent at `http://localhost:8080/mcp` instead of the upstream ser
 **Receipt payload truncation.** Tool outputs larger than 256 KB (configurable via `MANIFEST_MAX_PAYLOAD_BYTES`) are replaced with a SHA-256 hash reference in the receipt. The original payload is not stored — only its hash. This prevents SQLite bloat but means large outputs cannot be fully reconstructed from receipts alone.
 
 **Identity is self-declared.** In the open-source version, agent identity comes from the MCP handshake, a config file, or the environment. None of these sources are cryptographically verified (`"verified": false`). An agent can claim to be anything.
+
+**Pruning does not remove Merkle leaves.** `manifest prune` deletes receipt records from SQLite but leaves the Merkle tree intact (it is append-only by design). After pruning, `manifest verify` will fail for deleted receipts since the receipt JSON is gone, but the Merkle tree remains consistent for non-pruned receipts. Pruning is for storage management, not for Merkle tree maintenance.
+
+**No TLS built in.** The HTTP proxy binds to `127.0.0.1` and serves plaintext HTTP. For network deployments, place a reverse proxy (nginx, caddy) in front to terminate TLS. Bearer tokens travel in plaintext without TLS.
 
 ## What This Does NOT Capture
 

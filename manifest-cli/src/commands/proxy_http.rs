@@ -4,7 +4,7 @@ use std::time::Duration;
 use manifest_core::{
     AgentIdentity, ManifestError, MerkleTree, PolicyConfig, Signer, Storage,
 };
-use manifest_proxy::http_relay::{build_router, HttpProxyState};
+use manifest_proxy::http_relay::{build_router, spawn_session_reaper, HttpProxyState};
 use manifest_proxy::receipt_builder::receipt_worker;
 use manifest_proxy::session::McpSession;
 use tokio::sync::mpsc;
@@ -20,6 +20,7 @@ pub async fn run(
     key_path: Option<&str>,
     db_path: Option<&str>,
     auth_token: Option<&str>,
+    rate_limit: Option<u64>,
 ) -> Result<(), ManifestError> {
     let key_file = resolve_key_path(key_path);
     let db_file = resolve_db_path(db_path);
@@ -90,7 +91,11 @@ pub async fn run(
         policy,
         receipt_tx,
         auth_token.map(|s| s.to_string()),
+        rate_limit,
     );
+
+    // Start background session reaper (evicts idle sessions)
+    let reaper_handle = spawn_session_reaper(state.clone());
 
     let app = build_router(state);
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
@@ -99,6 +104,9 @@ pub async fn run(
     eprintln!("Upstream MCP server: {upstream_url}");
     if auth_token.is_some() {
         eprintln!("Authentication: Bearer token required");
+    }
+    if let Some(rps) = rate_limit {
+        eprintln!("Rate limit: {rps} requests/second");
     }
 
     let listener = tokio::net::TcpListener::bind(addr)
@@ -110,6 +118,9 @@ pub async fn run(
         .with_graceful_shutdown(shutdown_signal())
         .await
         .map_err(|e| ManifestError::Config(format!("server error: {e}")))?;
+
+    // Stop the session reaper
+    reaper_handle.abort();
 
     // Wait for receipt worker to drain
     tracing::debug!("waiting for receipt worker to drain");
