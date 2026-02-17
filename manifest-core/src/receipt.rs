@@ -50,6 +50,10 @@ impl Receipt {
     /// Includes all fields except `proof.signature` and `proof.merkle_root`
     /// to avoid circular dependencies (the root depends on the receipt hash,
     /// which depends on the signature).
+    ///
+    /// Uses `serde_json::to_vec` on a `Value` object, which produces sorted
+    /// keys via `BTreeMap` (default serde_json without `preserve_order`).
+    /// This guarantees cross-platform deterministic serialization.
     pub fn canonical_bytes(&self) -> Vec<u8> {
         let signable = serde_json::json!({
             "@context": self.context,
@@ -68,6 +72,8 @@ impl Receipt {
     ///
     /// Covers identity + policy + action + delta + signature + previousReceipt.
     /// The merkle_root is excluded because it depends on this hash.
+    ///
+    /// Canonical JSON: sorted keys via `BTreeMap`-backed `Value` objects.
     pub fn content_hash(&self) -> String {
         let hashable = serde_json::json!({
             "@context": self.context,
@@ -322,6 +328,29 @@ mod tests {
             .build(&signer, &mut merkle);
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn canonical_bytes_have_sorted_keys() {
+        let signer = Signer::generate();
+        let mut merkle = MerkleTree::new();
+
+        let receipt = ReceiptBuilder::new()
+            .agent(test_identity())
+            .action(test_action())
+            .build(&signer, &mut merkle)
+            .unwrap();
+
+        let canonical = receipt.canonical_bytes();
+        let json_str = String::from_utf8(canonical).unwrap();
+
+        // Parse back and verify keys are alphabetically sorted at top level
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        let obj = parsed.as_object().unwrap();
+        let keys: Vec<&String> = obj.keys().collect();
+        let mut sorted_keys = keys.clone();
+        sorted_keys.sort();
+        assert_eq!(keys, sorted_keys, "canonical JSON keys must be sorted");
     }
 
     #[test]

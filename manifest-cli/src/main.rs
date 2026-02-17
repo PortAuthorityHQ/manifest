@@ -79,6 +79,20 @@ enum Commands {
         db: Option<String>,
     },
 
+    /// Verify a receipt's signature and Merkle proof
+    Verify {
+        /// Receipt content hash or ID
+        hash: String,
+
+        /// Path to the public key file (.pub)
+        #[arg(long)]
+        public_key: String,
+
+        /// Path to the SQLite database
+        #[arg(long)]
+        db: Option<String>,
+    },
+
     /// Generate a new signing keypair
     Init {
         /// Path to store the keypair
@@ -116,6 +130,9 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Export { session, format, output, db } => {
             commands::export::run(session.as_deref(), &format, output.as_deref(), db.as_deref())?;
+        }
+        Commands::Verify { hash, public_key, db } => {
+            commands::verify::run(&hash, &public_key, db.as_deref())?;
         }
         Commands::Init { key } => {
             commands::init::run(key.as_deref())?;

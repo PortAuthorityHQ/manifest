@@ -104,6 +104,9 @@ manifest inspect <receipt-hash>
 
 # Export an audit-ready bundle for a session
 manifest export --session <session-id> --format json
+
+# Verify a receipt's signature, hash, and Merkle proof
+manifest verify <receipt-hash> --public-key ~/.manifest/signing.key.pub
 ```
 
 ## The Receipt
@@ -269,7 +272,8 @@ This is still more than any enterprise currently has.
 - [x] CLI tooling (`log`, `inspect`, `export`)
 - [x] Agent identity (auto-detect from MCP handshake + config file + environment)
 - [x] YAML policy engine (tool allowlists, spending limit schema)
-- [ ] Policy evaluation (spending limit enforcement, PII detection)
+- [x] Policy evaluation (spending limit enforcement, PII detection)
+- [x] Receipt verification (`manifest verify` — signature, hash, Merkle proof, chain)
 - [ ] HTTP/SSE MCP transport support
 - [ ] REST API interception (requires per-API config)
 - [ ] OPA/Rego policy integration

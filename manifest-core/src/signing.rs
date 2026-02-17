@@ -70,6 +70,53 @@ impl Signer {
     pub fn verifying_key(&self) -> VerifyingKey {
         self.signing_key.verifying_key()
     }
+
+    /// Save the 32-byte public key to a file.
+    pub fn save_public_key(&self, path: &std::path::Path) -> Result<(), ManifestError> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, self.verifying_key().to_bytes())?;
+        Ok(())
+    }
+}
+
+/// Verify a signature using a standalone public key (no signing key required).
+///
+/// This is what a receipt verifier uses — they only need the public key,
+/// not the private signing key.
+pub fn verify_with_public_key(
+    public_key_bytes: &[u8; 32],
+    data: &[u8],
+    signature_str: &str,
+) -> Result<bool, ManifestError> {
+    let verifying_key = VerifyingKey::from_bytes(public_key_bytes)
+        .map_err(|e| ManifestError::Signing(format!("invalid public key: {e}")))?;
+
+    let encoded = signature_str
+        .strip_prefix("ed25519:")
+        .ok_or_else(|| ManifestError::Signing("signature must start with 'ed25519:'".into()))?;
+
+    let sig_bytes =
+        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded)
+            .map_err(|e| ManifestError::Signing(format!("invalid base64: {e}")))?;
+
+    let signature = Signature::from_slice(&sig_bytes)
+        .map_err(|e| ManifestError::Signing(format!("invalid signature bytes: {e}")))?;
+
+    Ok(verifying_key.verify(data, &signature).is_ok())
+}
+
+/// Load a 32-byte public key from a file.
+pub fn load_public_key(path: &std::path::Path) -> Result<[u8; 32], ManifestError> {
+    let bytes = std::fs::read(path)?;
+    if bytes.len() != 32 {
+        return Err(ManifestError::Signing(format!(
+            "public key file must be exactly 32 bytes, got {}",
+            bytes.len()
+        )));
+    }
+    Ok(bytes.try_into().unwrap())
 }
 
 #[cfg(test)]
@@ -118,6 +165,44 @@ mod tests {
         let loaded = Signer::from_file(&path).unwrap();
 
         assert!(loaded.verify(data, &sig).unwrap());
+    }
+
+    #[test]
+    fn verify_with_public_key_roundtrip() {
+        let signer = Signer::generate();
+        let data = b"verify with public key";
+        let sig = signer.sign(data);
+
+        let pub_bytes = signer.verifying_key().to_bytes();
+        assert!(super::verify_with_public_key(&pub_bytes, data, &sig).unwrap());
+    }
+
+    #[test]
+    fn verify_with_wrong_public_key() {
+        let signer1 = Signer::generate();
+        let signer2 = Signer::generate();
+        let data = b"test";
+        let sig = signer1.sign(data);
+
+        let wrong_key = signer2.verifying_key().to_bytes();
+        assert!(!super::verify_with_public_key(&wrong_key, data, &sig).unwrap());
+    }
+
+    #[test]
+    fn save_and_load_public_key() {
+        let dir = TempDir::new().unwrap();
+        let pub_path = dir.path().join("test.pub");
+
+        let signer = Signer::generate();
+        signer.save_public_key(&pub_path).unwrap();
+
+        let loaded = super::load_public_key(&pub_path).unwrap();
+        assert_eq!(loaded, signer.verifying_key().to_bytes());
+
+        // Verify a signature using the loaded public key
+        let data = b"public key persistence";
+        let sig = signer.sign(data);
+        assert!(super::verify_with_public_key(&loaded, data, &sig).unwrap());
     }
 
     #[test]

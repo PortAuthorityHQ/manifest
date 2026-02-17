@@ -14,9 +14,14 @@ pub fn run(key_path: Option<&str>) -> Result<(), ManifestError> {
     let signer = Signer::generate();
     signer.save(&path)?;
 
+    // Save the public key alongside the private key
+    let pub_path = PathBuf::from(format!("{}.pub", path.display()));
+    signer.save_public_key(&pub_path)?;
+
     eprintln!("Generated new signing key: {}", path.display());
+    eprintln!("Public key saved to:       {}", pub_path.display());
     eprintln!(
-        "Public key: {}",
+        "Public key (hex):          {}",
         hex::encode(signer.verifying_key().to_bytes())
     );
 

@@ -20,9 +20,9 @@ pub struct CapturedToolCall {
 /// Background worker that consumes captured tool calls and generates signed receipts.
 ///
 /// Runs as a `tokio::spawn`-ed task. Reads from the mpsc channel and for each
-/// captured call: builds the receipt, signs it, appends to the Merkle tree,
-/// and persists to SQLite. Errors are logged but never propagated — the relay
-/// must never be blocked or disrupted by receipt generation failures.
+/// captured call: extracts session state on the async side, then offloads
+/// signing + SQLite writes to a blocking thread via `spawn_blocking` to
+/// avoid blocking the tokio runtime.
 pub async fn receipt_worker(
     mut rx: mpsc::UnboundedReceiver<CapturedToolCall>,
     session: Arc<Mutex<McpSession>>,
@@ -31,48 +31,79 @@ pub async fn receipt_worker(
     storage: Arc<Mutex<Storage>>,
 ) {
     while let Some(captured) = rx.recv().await {
-        if let Err(e) = process_captured_call(&captured, &session, &signer, &merkle, &storage) {
-            tracing::error!(
-                tool = %captured.tool_name,
-                error = %e,
-                "failed to generate receipt"
+        // Extract session state synchronously (fast, no IO)
+        let session_state = {
+            let sess = match session.lock() {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!("session lock poisoned: {e}");
+                    continue;
+                }
+            };
+
+            let identity = sess.identity();
+            let policy_snapshot = sess.policy_snapshot();
+            let session_id = sess.session_id.clone();
+            let (authorized, violations) = sess.check_tool(
+                &captured.tool_name,
+                &captured.input,
+                captured.output.as_ref(),
             );
+            let delta = if policy_snapshot.is_some() {
+                Some(manifest_core::receipt::Delta {
+                    authorized,
+                    violations,
+                })
+            } else {
+                None
+            };
+
+            (identity, policy_snapshot, session_id, delta)
+        };
+
+        // Offload signing + hashing + SQLite writes to a blocking thread
+        let signer = signer.clone();
+        let merkle = merkle.clone();
+        let storage = storage.clone();
+        let tool_name = captured.tool_name.clone();
+
+        let result = tokio::task::spawn_blocking(move || {
+            process_captured_call(captured, session_state, &signer, &merkle, &storage)
+        })
+        .await;
+
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                tracing::error!(tool = %tool_name, error = %e, "failed to generate receipt");
+            }
+            Err(e) => {
+                tracing::error!(tool = %tool_name, error = %e, "receipt task panicked");
+            }
         }
     }
 
     tracing::debug!("receipt worker shutting down");
 }
 
+type SessionState = (
+    manifest_core::AgentIdentity,
+    Option<manifest_core::PolicySnapshot>,
+    String, // session_id
+    Option<manifest_core::receipt::Delta>,
+);
+
+/// Process a captured tool call on a blocking thread.
+///
+/// This runs inside `spawn_blocking` so it's safe to do CPU-intensive
+/// signing and blocking SQLite IO here without stalling tokio.
 fn process_captured_call(
-    captured: &CapturedToolCall,
-    session: &Arc<Mutex<McpSession>>,
+    captured: CapturedToolCall,
+    (identity, policy_snapshot, session_id, delta): SessionState,
     signer: &Signer,
     merkle: &Arc<Mutex<MerkleTree>>,
     storage: &Arc<Mutex<Storage>>,
 ) -> Result<(), manifest_core::ManifestError> {
-    let (identity, policy_snapshot, session_id, delta) = {
-        let sess = session.lock().map_err(|e| {
-            manifest_core::ManifestError::Config(format!("session lock poisoned: {e}"))
-        })?;
-
-        let identity = sess.identity();
-        let policy_snapshot = sess.policy_snapshot();
-        let session_id = sess.session_id.clone();
-
-        // Check authorization
-        let (authorized, violations) = sess.check_tool(&captured.tool_name);
-        let delta = if sess.policy_snapshot().is_some() {
-            Some(manifest_core::receipt::Delta {
-                authorized,
-                violations,
-            })
-        } else {
-            None
-        };
-
-        (identity, policy_snapshot, session_id, delta)
-    };
-
     // Get previous receipt hash for chaining
     let prev_hash = {
         let store = storage.lock().map_err(|e| {
@@ -83,9 +114,9 @@ fn process_captured_call(
 
     let action = Action {
         tool: captured.tool_name.clone(),
-        input: captured.input.clone(),
-        output: captured.output.clone(),
-        error: captured.error.clone(),
+        input: captured.input,
+        output: captured.output,
+        error: captured.error,
     };
 
     // Build and sign the receipt

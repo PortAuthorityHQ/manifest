@@ -167,6 +167,22 @@ if [ -f "$DB_PATH" ]; then
         if [ "$LEAF_COUNT" -ge 3 ]; then
             echo "    PASS: Merkle tree leaves match receipt count"
         fi
+
+        echo ""
+
+        # Verify a receipt's signature and Merkle proof
+        PUB_KEY="$KEY_PATH.pub"
+        if [ -f "$PUB_KEY" ] && [ -n "$FIRST_HASH" ]; then
+            echo "--- Step 7: Cryptographic verification"
+            VERIFY_OUTPUT=$("$MANIFEST" verify "$FIRST_HASH" --public-key "$PUB_KEY" --db "$DB_PATH" 2>&1)
+            echo "$VERIFY_OUTPUT"
+
+            if echo "$VERIFY_OUTPUT" | grep -q "verified successfully"; then
+                echo "    PASS: Receipt cryptographic verification"
+            else
+                echo "    FAIL: Receipt verification failed"
+            fi
+        fi
     else
         DB_SIZE=$(wc -c < "$DB_PATH")
         echo "    Database size: $DB_SIZE bytes"
@@ -186,6 +202,69 @@ echo ""
 echo "--- Proxy log output (stderr):"
 if [ -f "$TEST_DIR/proxy_stderr.log" ]; then
     cat "$TEST_DIR/proxy_stderr.log" | head -20
+fi
+
+# ── Step 8: Test policy evaluation ────────────────────────────────────────
+
+echo "--- Step 8: Policy evaluation"
+
+POLICY_DB="$TEST_DIR/policy_receipts.db"
+POLICY_FILE="$TEST_DIR/policy.yml"
+
+cat > "$POLICY_FILE" << 'YAML'
+policies:
+  - name: tool-allowlist
+    allowed_tools:
+      - echo
+      - add
+  - name: spending-limit
+    max_transaction_value: 10000
+  - name: pii-flag
+    flag_if_contains:
+      - SSN
+      - credit_card
+YAML
+
+# Input with a disallowed tool (db_query) and PII in the query
+cat > "$TEST_DIR/policy_input.jsonl" << 'JSONL'
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"policy-agent","version":"1.0"},"protocolVersion":"2024-11-05"}}
+{"jsonrpc":"2.0","method":"notifications/initialized"}
+{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"echo","arguments":{"message":"hello"}}}
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"db_query","arguments":{"query":"SELECT ssn FROM users WHERE amount > 50000"}}}
+JSONL
+
+"$MANIFEST" proxy \
+    --server "$MOCK_SERVER" \
+    --key "$KEY_PATH" \
+    --db "$POLICY_DB" \
+    --policy "$POLICY_FILE" \
+    < "$TEST_DIR/policy_input.jsonl" 2>"$TEST_DIR/policy_stderr.log" || true
+
+if command -v sqlite3 &> /dev/null && [ -f "$POLICY_DB" ]; then
+    POLICY_RECEIPT_COUNT=$(sqlite3 "$POLICY_DB" "SELECT COUNT(*) FROM receipts;")
+    echo "    Policy receipts generated: $POLICY_RECEIPT_COUNT"
+
+    # Check that the db_query receipt has a delta with violations
+    DB_QUERY_JSON=$(sqlite3 "$POLICY_DB" "SELECT receipt_json FROM receipts WHERE tool_name='db_query' LIMIT 1;")
+    if echo "$DB_QUERY_JSON" | grep -q "tool_not_in_allowlist"; then
+        echo "    PASS: Tool allowlist violation recorded"
+    else
+        echo "    WARN: Expected allowlist violation for db_query"
+    fi
+
+    if echo "$DB_QUERY_JSON" | grep -q "pii_detected"; then
+        echo "    PASS: PII violation recorded"
+    else
+        echo "    WARN: Expected PII violation for SSN in query"
+    fi
+
+    # Echo should have no violations (authorized tool, no PII, no spending)
+    ECHO_JSON=$(sqlite3 "$POLICY_DB" "SELECT receipt_json FROM receipts WHERE tool_name='echo' LIMIT 1;")
+    if echo "$ECHO_JSON" | grep -q '"authorized":true'; then
+        echo "    PASS: Authorized tool has no violations"
+    else
+        echo "    WARN: Expected echo to be authorized"
+    fi
 fi
 
 echo ""

@@ -83,20 +83,21 @@ impl McpSession {
         self.policy.as_ref().map(|p| p.to_snapshot())
     }
 
-    /// Check if a tool is allowed by the policy. Returns violations if any.
-    pub fn check_tool(&self, tool_name: &str) -> (bool, Vec<String>) {
+    /// Check if a tool call is authorized by all policy rules.
+    ///
+    /// Evaluates tool allowlist, spending limits, and PII detection.
+    /// Returns `(authorized, violations)`.
+    pub fn check_tool(
+        &self,
+        tool_name: &str,
+        input: &serde_json::Value,
+        output: Option<&serde_json::Value>,
+    ) -> (bool, Vec<String>) {
         let Some(ref policy) = self.policy else {
             return (true, Vec::new());
         };
 
-        let mut violations = Vec::new();
-
-        if let Some(allowed) = policy.is_tool_allowed(tool_name) {
-            if !allowed {
-                violations.push("tool_not_in_allowlist".to_string());
-            }
-        }
-
+        let violations = policy.evaluate(tool_name, input, output);
         (violations.is_empty(), violations)
     }
 }
@@ -156,7 +157,8 @@ mod tests {
     #[test]
     fn tool_check_no_policy() {
         let session = McpSession::new(None, None);
-        let (allowed, violations) = session.check_tool("anything");
+        let input = serde_json::json!({});
+        let (allowed, violations) = session.check_tool("anything", &input, None);
         assert!(allowed);
         assert!(violations.is_empty());
     }
@@ -169,12 +171,34 @@ mod tests {
             }],
         };
         let session = McpSession::new(None, Some(policy));
+        let input = serde_json::json!({"query": "SELECT 1"});
 
-        let (allowed, _) = session.check_tool("db_query");
+        let (allowed, _) = session.check_tool("db_query", &input, None);
         assert!(allowed);
 
-        let (allowed, violations) = session.check_tool("drop_table");
+        let (allowed, violations) = session.check_tool("drop_table", &input, None);
         assert!(!allowed);
-        assert!(violations.contains(&"tool_not_in_allowlist".to_string()));
+        assert!(violations.iter().any(|v| v.contains("tool_not_in_allowlist")));
+    }
+
+    #[test]
+    fn tool_check_spending_and_pii() {
+        let policy = PolicyConfig {
+            policies: vec![
+                manifest_core::PolicyRule::SpendingLimit {
+                    max_transaction_value: 1000,
+                },
+                manifest_core::PolicyRule::PiiFlag {
+                    flag_if_contains: vec!["SSN".into()],
+                },
+            ],
+        };
+        let session = McpSession::new(None, Some(policy));
+
+        // High value + PII = 2 violations
+        let input = serde_json::json!({"amount": 5000, "field": "ssn"});
+        let (allowed, violations) = session.check_tool("transfer", &input, None);
+        assert!(!allowed);
+        assert_eq!(violations.len(), 2);
     }
 }

@@ -86,6 +86,88 @@ impl PolicyConfig {
         }
         None
     }
+
+    /// Evaluate all policy rules against a tool call.
+    ///
+    /// Returns a list of violation strings. An empty list means the action
+    /// is fully authorized.
+    pub fn evaluate(
+        &self,
+        tool_name: &str,
+        input: &serde_json::Value,
+        output: Option<&serde_json::Value>,
+    ) -> Vec<String> {
+        let mut violations = Vec::new();
+
+        for rule in &self.policies {
+            match rule {
+                PolicyRule::ToolAllowlist { allowed_tools } => {
+                    if !allowed_tools.iter().any(|t| t == tool_name) {
+                        violations.push(format!(
+                            "tool_not_in_allowlist: '{tool_name}' not in [{}]",
+                            allowed_tools.join(", ")
+                        ));
+                    }
+                }
+                PolicyRule::SpendingLimit {
+                    max_transaction_value,
+                } => {
+                    for value in extract_numeric_values(input) {
+                        if value > *max_transaction_value as f64 {
+                            violations.push(format!(
+                                "spending_limit_exceeded: value {value} exceeds max {max_transaction_value}"
+                            ));
+                        }
+                    }
+                }
+                PolicyRule::PiiFlag { flag_if_contains } => {
+                    let input_str = input.to_string().to_lowercase();
+                    for pattern in flag_if_contains {
+                        let pattern_lower = pattern.to_lowercase();
+                        if input_str.contains(&pattern_lower) {
+                            violations.push(format!("pii_detected_in_input: '{pattern}'"));
+                        }
+                    }
+
+                    if let Some(out) = output {
+                        let output_str = out.to_string().to_lowercase();
+                        for pattern in flag_if_contains {
+                            let pattern_lower = pattern.to_lowercase();
+                            if output_str.contains(&pattern_lower) {
+                                violations.push(format!("pii_detected_in_output: '{pattern}'"));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        violations
+    }
+}
+
+/// Recursively extract all numeric values from a JSON value.
+fn extract_numeric_values(value: &serde_json::Value) -> Vec<f64> {
+    let mut values = Vec::new();
+    match value {
+        serde_json::Value::Number(n) => {
+            if let Some(f) = n.as_f64() {
+                values.push(f);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for v in map.values() {
+                values.extend(extract_numeric_values(v));
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for v in arr {
+                values.extend(extract_numeric_values(v));
+            }
+        }
+        _ => {}
+    }
+    values
 }
 
 #[cfg(test)]
@@ -157,6 +239,118 @@ policies:
             }],
         };
         assert_eq!(config.is_tool_allowed("anything"), None);
+    }
+
+    #[test]
+    fn evaluate_spending_limit_violation() {
+        let config = PolicyConfig {
+            policies: vec![PolicyRule::SpendingLimit {
+                max_transaction_value: 10000,
+            }],
+        };
+
+        let input = serde_json::json!({"amount": 50000, "currency": "USD"});
+        let violations = config.evaluate("transfer", &input, None);
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].contains("spending_limit_exceeded"));
+        assert!(violations[0].contains("50000"));
+    }
+
+    #[test]
+    fn evaluate_spending_limit_nested() {
+        let config = PolicyConfig {
+            policies: vec![PolicyRule::SpendingLimit {
+                max_transaction_value: 1000,
+            }],
+        };
+
+        let input = serde_json::json!({
+            "order": {
+                "items": [{"price": 500}, {"price": 2000}]
+            }
+        });
+        let violations = config.evaluate("checkout", &input, None);
+        // Only the 2000 value exceeds the limit
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].contains("2000"));
+    }
+
+    #[test]
+    fn evaluate_spending_limit_passes() {
+        let config = PolicyConfig {
+            policies: vec![PolicyRule::SpendingLimit {
+                max_transaction_value: 10000,
+            }],
+        };
+
+        let input = serde_json::json!({"amount": 500});
+        let violations = config.evaluate("transfer", &input, None);
+        assert!(violations.is_empty());
+    }
+
+    #[test]
+    fn evaluate_pii_in_input() {
+        let config = PolicyConfig {
+            policies: vec![PolicyRule::PiiFlag {
+                flag_if_contains: vec!["SSN".into(), "credit_card".into()],
+            }],
+        };
+
+        let input = serde_json::json!({"query": "SELECT ssn FROM users"});
+        let violations = config.evaluate("db_query", &input, None);
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].contains("pii_detected_in_input"));
+        assert!(violations[0].contains("SSN"));
+    }
+
+    #[test]
+    fn evaluate_pii_in_output() {
+        let config = PolicyConfig {
+            policies: vec![PolicyRule::PiiFlag {
+                flag_if_contains: vec!["credit_card".into()],
+            }],
+        };
+
+        let input = serde_json::json!({"query": "SELECT * FROM payments"});
+        let output = serde_json::json!({"rows": [{"credit_card": "4111-1111-1111"}]});
+        let violations = config.evaluate("db_query", &input, Some(&output));
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].contains("pii_detected_in_output"));
+    }
+
+    #[test]
+    fn evaluate_no_pii() {
+        let config = PolicyConfig {
+            policies: vec![PolicyRule::PiiFlag {
+                flag_if_contains: vec!["SSN".into()],
+            }],
+        };
+
+        let input = serde_json::json!({"query": "SELECT name FROM users"});
+        let violations = config.evaluate("db_query", &input, None);
+        assert!(violations.is_empty());
+    }
+
+    #[test]
+    fn evaluate_multiple_rules() {
+        let config = PolicyConfig {
+            policies: vec![
+                PolicyRule::ToolAllowlist {
+                    allowed_tools: vec!["db_query".into()],
+                },
+                PolicyRule::SpendingLimit {
+                    max_transaction_value: 1000,
+                },
+                PolicyRule::PiiFlag {
+                    flag_if_contains: vec!["SSN".into()],
+                },
+            ],
+        };
+
+        // Disallowed tool, high value, and PII
+        let input = serde_json::json!({"amount": 5000, "field": "ssn"});
+        let violations = config.evaluate("transfer", &input, None);
+        assert_eq!(violations.len(), 3);
     }
 
     #[test]
