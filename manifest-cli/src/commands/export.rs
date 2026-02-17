@@ -493,3 +493,194 @@ pre {{
 
     html
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use manifest_core::receipt::Delta;
+    use manifest_core::{
+        Action, ActionError, AgentIdentity, IdentitySource, MerkleTree, ReceiptBuilder, Signer,
+    };
+
+    // --- escape_html tests ---
+
+    #[test]
+    fn escape_html_individual_chars() {
+        assert_eq!(escape_html("<"), "&lt;");
+        assert_eq!(escape_html(">"), "&gt;");
+        assert_eq!(escape_html("&"), "&amp;");
+        assert_eq!(escape_html("\""), "&quot;");
+        assert_eq!(escape_html("'"), "&#39;");
+    }
+
+    #[test]
+    fn escape_html_script_injection() {
+        assert_eq!(
+            escape_html("<script>alert('xss')</script>"),
+            "&lt;script&gt;alert(&#39;xss&#39;)&lt;/script&gt;"
+        );
+    }
+
+    #[test]
+    fn escape_html_attribute_breaking() {
+        assert_eq!(
+            escape_html("\" onclick=\"alert(1)"),
+            "&quot; onclick=&quot;alert(1)"
+        );
+    }
+
+    #[test]
+    fn escape_html_ampersand_ordering() {
+        // & must be escaped first to avoid double-escaping
+        assert_eq!(escape_html("&lt;"), "&amp;lt;");
+        assert_eq!(escape_html("&amp;"), "&amp;amp;");
+    }
+
+    #[test]
+    fn escape_html_passthrough() {
+        assert_eq!(escape_html("normal text 123"), "normal text 123");
+        assert_eq!(escape_html(""), "");
+        assert_eq!(escape_html("hello world"), "hello world");
+    }
+
+    // --- render_html tests ---
+
+    fn make_test_receipt(violations: Vec<String>) -> Receipt {
+        let signer = Signer::generate();
+        let mut merkle = MerkleTree::new();
+
+        ReceiptBuilder::new()
+            .agent(AgentIdentity {
+                name: "test-agent".into(),
+                version: Some("1.0".into()),
+                deployer: None,
+                environment: None,
+                source: IdentitySource::Environment,
+                verified: false,
+            })
+            .action(Action {
+                tool: "test_tool".into(),
+                input: serde_json::json!({"query": "SELECT 1"}),
+                output: Some(serde_json::json!({"rows": 1})),
+                error: None,
+            })
+            .delta(Some(Delta {
+                authorized: violations.is_empty(),
+                violations,
+            }))
+            .build(&signer, &mut merkle)
+            .unwrap()
+    }
+
+    #[test]
+    fn render_html_valid_structure() {
+        let html = render_html(&[make_test_receipt(vec![])]);
+        assert!(html.contains("<!DOCTYPE html>"));
+        assert!(html.contains("</html>"));
+        assert!(html.contains("<title>Manifest — Agent Activity Report</title>"));
+        assert!(html.contains("</body>"));
+    }
+
+    #[test]
+    fn render_html_xss_in_violations() {
+        let html = render_html(&[make_test_receipt(vec![
+            "<script>alert('xss')</script>".into(),
+        ])]);
+        assert!(html.contains("&lt;script&gt;"));
+        assert!(!html.contains("<script>alert"));
+    }
+
+    #[test]
+    fn render_html_violation_badge() {
+        let html = render_html(&[make_test_receipt(vec!["spending limit exceeded".into()])]);
+        assert!(html.contains("badge-violation"));
+        assert!(html.contains("VIOLATION"));
+        assert!(html.contains("spending limit exceeded"));
+    }
+
+    #[test]
+    fn render_html_authorized_badge() {
+        let html = render_html(&[make_test_receipt(vec![])]);
+        assert!(html.contains("badge-ok"));
+        assert!(html.contains("AUTHORIZED"));
+    }
+
+    #[test]
+    fn render_html_xss_in_tool_and_agent_names() {
+        let signer = Signer::generate();
+        let mut merkle = MerkleTree::new();
+
+        let receipt = ReceiptBuilder::new()
+            .agent(AgentIdentity {
+                name: "<img src=x onerror=alert(1)>".into(),
+                version: None,
+                deployer: None,
+                environment: None,
+                source: IdentitySource::Environment,
+                verified: false,
+            })
+            .action(Action {
+                tool: "<script>steal()</script>".into(),
+                input: serde_json::json!({}),
+                output: None,
+                error: None,
+            })
+            .build(&signer, &mut merkle)
+            .unwrap();
+
+        let html = render_html(&[receipt]);
+        assert!(!html.contains("<img src=x"));
+        assert!(!html.contains("<script>steal"));
+        assert!(html.contains("&lt;img src=x"));
+        assert!(html.contains("&lt;script&gt;steal"));
+    }
+
+    #[test]
+    fn render_html_error_box() {
+        let signer = Signer::generate();
+        let mut merkle = MerkleTree::new();
+
+        let receipt = ReceiptBuilder::new()
+            .agent(AgentIdentity {
+                name: "test".into(),
+                version: None,
+                deployer: None,
+                environment: None,
+                source: IdentitySource::Environment,
+                verified: false,
+            })
+            .action(Action {
+                tool: "failing_tool".into(),
+                input: serde_json::json!({}),
+                output: None,
+                error: Some(ActionError {
+                    code: -32603,
+                    message: "Internal error <malicious>".into(),
+                    data: None,
+                }),
+            })
+            .build(&signer, &mut merkle)
+            .unwrap();
+
+        let html = render_html(&[receipt]);
+        assert!(html.contains("error-box"));
+        assert!(html.contains("Error -32603"));
+        assert!(html.contains("&lt;malicious&gt;"));
+        assert!(!html.contains("<malicious>"));
+    }
+
+    #[test]
+    fn render_html_summary_stats() {
+        let receipts = vec![
+            make_test_receipt(vec!["violation 1".into()]),
+            make_test_receipt(vec![]),
+            make_test_receipt(vec![]),
+        ];
+        let html = render_html(&receipts);
+
+        // 3 total receipts
+        assert!(html.contains("<div class=\"stat-value\">3</div>"));
+        // 1 violation
+        assert!(html.contains("<div class=\"stat-value violations\">1</div>"));
+    }
+}

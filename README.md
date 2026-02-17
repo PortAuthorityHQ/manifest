@@ -400,28 +400,37 @@ This is still more than any enterprise currently has.
 
 ## Roadmap
 
+### Shipped (MVP)
+
 - [x] stdio MCP proxy (spawn + intercept)
 - [x] Receipt generation (JSON-LD + Ed25519 + Merkle tree)
-- [x] CLI tooling (`log`, `inspect`, `export`)
+- [x] CLI tooling (`log`, `inspect`, `export`, `watch`, `prune`, `verify`)
 - [x] Agent identity (auto-detect from MCP handshake + config file + environment)
-- [x] YAML policy engine (tool allowlists, spending limit schema)
-- [x] Policy evaluation (spending limit enforcement, PII detection, regex patterns)
-- [x] Receipt verification (`manifest verify` — signature, hash, Merkle proof, chain)
-- [x] HTTP/SSE MCP transport (`manifest proxy-http` — Streamable HTTP reverse proxy)
-- [x] Receipt size limits (auto-truncation of oversized payloads with hash reference)
-- [x] HTTP proxy authentication (bearer token + per-session state isolation)
-- [x] Database retention (`manifest prune --older-than 90d`)
-- [x] Real-time violation alerts (`--webhook` + stderr logging)
-- [x] Live receipt tailing (`manifest watch`)
-- [x] HTML export (`manifest export --format html` — shareable, self-contained report)
-- [x] Field-path spending limits (`field_path: "$.amount"` for precise checks)
-- [x] Storage trait abstraction (`StorageBackend` trait for pluggable backends)
-- [x] Merkle tree integrity verification (`manifest verify --tree-only`)
-- [ ] REST/gRPC API interception
-- [ ] OPA/Rego policy integration
-- [ ] HSM/KMS key management (key rotation, cloud KMS integration)
+- [x] YAML policy engine (tool allowlists, spending limits with field-path targeting, PII detection with regex)
+- [x] Receipt verification (signature, hash, Merkle proof, chain, `--tree-only` mode)
+- [x] HTTP/SSE MCP transport (`proxy-http` — Streamable HTTP reverse proxy with auth, rate limiting, session isolation)
+- [x] HTML export (self-contained, shareable reports)
+- [x] Real-time violation alerts (`--webhook`)
+- [x] Storage trait abstraction (`StorageBackend` for pluggable backends)
+
+### Post-Launch Priorities
+
+**Receipt format specification.** Publish a formal spec for the manifest receipt format so third-party tools can generate and verify receipts independently. If the receipt format becomes the standard for AI agent accountability, that's the moat — not the proxy itself.
+
+**Verifier SDK.** Standalone libraries (Rust, Python, JS) that verify manifest receipts without requiring the CLI. This makes receipts portable: an auditor verifies a receipt in a Jupyter notebook, a CI pipeline verifies receipts in a GitHub Action, a compliance dashboard verifies receipts in the browser.
+
+**SIEM/S3 export.** Enterprise buyers need receipts flowing into their existing Splunk, Sentinel, or S3 pipelines. This is the #1 enterprise adoption blocker — compliance teams don't install CLIs, they query dashboards connected to their log aggregators.
+
+### Future
+
+- [ ] Receipt format spec (formal, versioned, third-party verifiable)
+- [ ] Verifier SDK (Rust, Python, JS — verify receipts without the CLI)
 - [ ] SIEM/S3 export (Splunk, Sentinel, cloud storage)
+- [ ] OPA/Rego policy integration
+- [ ] REST/gRPC API interception
+- [ ] HSM/KMS key management (key rotation, cloud KMS integration)
 - [ ] Dashboard UI
+- [ ] Verified identity (SPIFFE/SVID, mTLS certificate chain)
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for how to get involved.
 

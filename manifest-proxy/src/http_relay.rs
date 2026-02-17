@@ -118,7 +118,11 @@ impl HttpProxyState {
         let rate_limiter = rate_limit.map(|rps| Arc::new(RateLimiter::new(rps)));
         Self {
             upstream_url,
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(5))
+                .timeout(Duration::from_secs(30))
+                .build()
+                .expect("failed to build HTTP client"),
             sessions: Arc::new(Mutex::new(HashMap::new())),
             identity_config,
             policy_config,
@@ -129,27 +133,43 @@ impl HttpProxyState {
         }
     }
 
+    /// Maximum number of concurrent sessions before rejecting new ones.
+    const MAX_SESSIONS: usize = 10_000;
+
     /// Get or create per-session state for the given session ID.
     /// An empty string key is used as the "default" session for servers
     /// that don't send `Mcp-Session-Id` headers.
-    fn get_or_create_session(&self, session_id: &str) {
+    ///
+    /// Returns `false` if the session limit is reached and a new session
+    /// would need to be created.
+    fn get_or_create_session(&self, session_id: &str) -> bool {
         let mut sessions = self.sessions.lock().unwrap();
         if let Some(s) = sessions.get_mut(session_id) {
             s.last_accessed = Instant::now();
-        } else {
-            sessions.insert(
-                session_id.to_string(),
-                PerSessionState {
-                    session: McpSession::new(
-                        self.identity_config.clone(),
-                        self.policy_config.clone(),
-                    ),
-                    pending: PendingCallMap::new(),
-                    last_accessed: Instant::now(),
-                },
-            );
-            tracing::debug!(session_id = %session_id, "created new per-session state");
+            return true;
         }
+
+        if sessions.len() >= Self::MAX_SESSIONS {
+            tracing::warn!(
+                count = sessions.len(),
+                "session limit reached, rejecting new session"
+            );
+            return false;
+        }
+
+        sessions.insert(
+            session_id.to_string(),
+            PerSessionState {
+                session: McpSession::new(
+                    self.identity_config.clone(),
+                    self.policy_config.clone(),
+                ),
+                pending: PendingCallMap::new(),
+                last_accessed: Instant::now(),
+            },
+        );
+        tracing::debug!(session_id = %session_id, "created new per-session state");
+        true
     }
 
     /// Evict sessions that haven't been accessed within the TTL.
@@ -306,7 +326,12 @@ async fn handle_post(
 
     // Determine the session ID from the request header (empty for initialize)
     let req_session_id = extract_session_id(&headers);
-    state.get_or_create_session(&req_session_id);
+    if !state.get_or_create_session(&req_session_id) {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "too many active sessions",
+        ).into_response();
+    }
 
     // Intercept the request (same logic as stdio relay)
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(body_str) {
@@ -410,12 +435,19 @@ async fn handle_post(
 
         (status, response_headers, body).into_response()
     } else {
-        // JSON response — intercept the full body
-        let resp_body = match upstream_resp.bytes().await {
-            Ok(b) => b,
-            Err(e) => {
+        // JSON response — intercept the full body (with timeout to prevent stalls)
+        let resp_body = match tokio::time::timeout(
+            Duration::from_secs(30),
+            upstream_resp.bytes(),
+        ).await {
+            Ok(Ok(b)) => b,
+            Ok(Err(e)) => {
                 tracing::error!(error = %e, "failed to read upstream response");
                 return (StatusCode::BAD_GATEWAY, "upstream read error").into_response();
+            }
+            Err(_) => {
+                tracing::error!("upstream response body read timed out");
+                return (StatusCode::GATEWAY_TIMEOUT, "upstream response timed out").into_response();
             }
         };
 
@@ -493,15 +525,17 @@ async fn handle_delete(
         upstream_req = upstream_req.header("mcp-session-id", sid.as_bytes());
     }
 
+    // Always clean up local session state — even if upstream is unreachable,
+    // the local session is stale and should be freed.
+    if !session_id.is_empty() {
+        if let Ok(mut sessions) = state.sessions.lock() {
+            sessions.remove(&session_id);
+        }
+    }
+
     match upstream_req.send().await {
         Ok(resp) => {
             let status = resp.status();
-            // Clean up session state on successful termination
-            if !session_id.is_empty() {
-                if let Ok(mut sessions) = state.sessions.lock() {
-                    sessions.remove(&session_id);
-                }
-            }
             tracing::info!(%status, session_id = %session_id, "session terminated via DELETE");
             StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::OK).into_response()
         }
