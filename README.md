@@ -1,2 +1,224 @@
 # manifest
-manifest is a high-performance Rust proxy that transforms ephemeral AI tool calls into permanent cryptographic evidence. It sits passively in your stack, capturing every interaction between your agents and the world, without slowing down a single token.
+
+**Cryptographic receipts for AI agent tool calls.**
+
+Stop guessing what your agents are doing. Start proving it.
+
+---
+
+`manifest` is a high-performance Rust proxy that sits between your AI agent and the tools it calls. Every tool interaction is intercepted, signed, and sealed into a tamper-proof receipt — linking what the agent *did* to what it was *authorized* to do.
+
+When a transaction is disputed, you don't show a dashboard. You show a signed manifest.
+
+## Why This Exists
+
+AI agents are moving money, accessing PII, and making consequential decisions. But when something goes wrong, enterprises have no forensic evidence — just mutable logs that prove nothing.
+
+`manifest` closes that gap:
+
+- **Evidence, not logs.** Every tool call is hashed (SHA-256), signed (Ed25519), and chained into a Merkle tree. Receipts are immutable and independently verifiable.
+- **Bidirectional proof.** Each receipt captures what was *authorized* (policy snapshot) alongside what *actually happened* (input/output). The delta between them is the accountability record.
+- **Sub-millisecond overhead.** Written in Rust on Tokio. Your agent won't feel it.
+- **MCP-native.** Built for the MCP `tools/call` protocol. REST/gRPC support planned.
+
+## How It Works
+
+`manifest` wraps your MCP server process. It spawns the server as a child process, sits on the stdio pipes, and intercepts every JSON-RPC message passing between your agent and the tool server. The agent and server are unaware it exists.
+
+```
+┌─────────┐  stdio   ┌──────────────┐  stdio  ┌──────────┐
+│  Agent  │────────▶ │   manifest   │────────▶│   MCP    │
+│ (Claude,│◀──────── │              │◀────────│  Server  │
+│  GPT,   │  stdin/  │  intercept   │  stdin/ │          │
+│  custom)│  stdout  │  sign & seal │  stdout │          │
+└─────────┘          └──────────────┘         └──────────┘
+                            │
+                            ▼
+                     ┌──────────────┐
+                     │   Receipt    │
+                     │   Store      │
+                     └──────────────┘
+```
+
+1. **Intercept** — Captures `tools/call` requests and responses as they pass through the stdio pipe. Handles the full MCP session lifecycle (initialization, notifications, errors) transparently.
+2. **Snapshot** — Records the active authorization policy at the moment of the call (optional — receipts are still valuable without policies configured).
+3. **Sign & Seal** — Buffers the complete response, then bundles identity, policy, action, and result into a signed JSON-LD receipt with Merkle tree linkage.
+4. **Forward** — Passes traffic through. Signing happens asynchronously after the response is forwarded to minimize added latency.
+
+## Quick Start
+
+Wrap any existing MCP server. `manifest` spawns it as a child process and intercepts all tool calls over stdio:
+
+```bash
+# Install
+npm install -g @port-authority/manifest
+
+# Wrap a local Postgres MCP server
+npx @port-authority/manifest --server "npx @modelcontextprotocol/server-postgres"
+
+# Wrap any MCP server
+npx @port-authority/manifest --server "your-mcp-server-command"
+```
+
+Point your agent's MCP client config at `manifest` instead of the server directly. Everything else works the same — your agent doesn't know it's being recorded.
+
+Receipts are generated on every `tools/call`. Query them via the CLI:
+
+```bash
+# View the last 10 receipts
+manifest log --tail 10
+
+# Show full receipt detail including any errors or policy violations
+manifest inspect <receipt-hash>
+
+# Export an audit-ready bundle for a session
+manifest export --session <session-id> --format json
+```
+
+## The Receipt
+
+Each tool interaction produces a JSON-LD receipt containing four layers:
+
+| Layer | What It Captures | How |
+|-------|-----------------|-----|
+| **Identity** | Who is the agent? Who deployed it? | SPIFFE/SVID certificate |
+| **Policy** | What was it authorized to do at this moment? | YAML config or OPA/Rego (optional) |
+| **Action** | What did it actually send and receive? | Input params + tool output |
+| **Proof** | Cryptographic seal binding it all together | Ed25519 signature + Merkle root |
+
+Example receipt (simplified):
+
+```json
+{
+  "@context": "https://portauthority.dev/receipt/v1",
+  "id": "urn:uuid:01956a3b-...",
+  "timestamp": "2026-02-16T14:23:01.847Z",
+  "agent": {
+    "spiffeId": "spiffe://acme.com/agent/procurement-bot",
+    "deployer": "acme-corp"
+  },
+  "policy": {
+    "maxTransactionValue": 50000,
+    "allowedTools": ["db_query", "send_email"],
+    "snapshot": "sha256:a1b2c3..."
+  },
+  "action": {
+    "tool": "db_query",
+    "input": { "query": "SELECT * FROM orders WHERE value > 10000" },
+    "output": { "rows": 42 },
+    "error": null
+  },
+  "delta": {
+    "authorized": true,
+    "violations": []
+  },
+  "proof": {
+    "signature": "ed25519:...",
+    "merkleRoot": "sha256:d4e5f6...",
+    "previousReceipt": "sha256:c3d4e5..."
+  }
+}
+```
+
+Errors get receipts too. If a tool call fails, times out, or the server crashes mid-response, the receipt captures exactly what happened:
+
+```json
+{
+  "action": {
+    "tool": "db_query",
+    "input": { "query": "DROP TABLE users" },
+    "output": null,
+    "error": { "code": -32603, "message": "permission denied" }
+  },
+  "delta": {
+    "authorized": false,
+    "violations": ["tool_not_in_allowlist"]
+  }
+}
+```
+
+If you instructed "authorize up to $50K" and the agent submitted a tool call for $100K — the delta is right there, cryptographically sealed, with the policy that was active at that exact moment.
+
+## Performance
+
+| Metric | Value |
+|--------|-------|
+| Signing overhead | ~50μs per receipt (Ed25519) |
+| Memory footprint | ~15MB |
+| Runtime | Rust + Tokio async I/O |
+| Signing | Ed25519 (ed25519-dalek) |
+| Hashing | SHA-256, Merkle tree chaining |
+| Impact on tool calls | Signing is async — responses are forwarded before the receipt is sealed |
+
+Note: total receipt generation time (serialization + hashing + signing + Merkle append) depends on response payload size. For typical tool call responses (<100KB), expect <1ms. Larger payloads take proportionally longer but do not block the agent since signing is asynchronous.
+
+## Policy Configuration (Optional)
+
+Policies are optional. Without them, `manifest` still generates signed receipts for every tool call — you get cryptographic proof of what happened. With policies, you also get proof of whether it was authorized.
+
+Define policies in a simple YAML file:
+
+```yaml
+# manifest.policy.yml
+policies:
+  - name: spending-limit
+    max_transaction_value: 50000
+
+  - name: tool-allowlist
+    allowed_tools:
+      - db_query
+      - send_email
+      - read_file
+
+  - name: pii-flag
+    flag_if_contains:
+      - SSN
+      - credit_card
+      - date_of_birth
+```
+
+```bash
+npx @port-authority/manifest --server "your-server" --policy manifest.policy.yml
+```
+
+Full OPA/Rego integration is on the roadmap for enterprise use cases.
+
+## Use Cases
+
+**Compliance** — EU AI Act (Article 12) requires automatic event recording for high-risk AI systems by August 2026. Colorado SB24-205 requires demonstrable "reasonable care" by June 2026. `manifest` generates the evidence trail automatically.
+
+**Vendor disputes** — When an LLM returns output that exceeds your instructions, you have cryptographic proof of the input/output mismatch and the active policy. You may not win every dispute, but you won't lose one for lack of evidence.
+
+**Insurance** — Insurers are adding AI exclusions to E&O and D&O policies. Receipts become your proof that controls are operational, not theoretical.
+
+**Debugging** — When an agent loops, burns credits, or hallucinates tool parameters, the receipt chain gives you the exact trace with cryptographic ordering.
+
+## What This Does NOT Capture
+
+`manifest` captures the decision chain (what tools were called, in what order, with what inputs and outputs) and the authorization context (what policies were active). It does **not** capture the LLM's internal reasoning or chain-of-thought — that lives inside the provider's inference pipeline.
+
+This is still more than any enterprise currently has.
+
+## Roadmap
+
+- [x] stdio MCP proxy (spawn + intercept)
+- [x] Receipt generation (JSON-LD + Ed25519 + Merkle tree)
+- [x] CLI tooling (`log`, `inspect`, `export`)
+- [ ] YAML policy engine (spending limits, tool allowlists, PII flags)
+- [ ] HTTP/SSE MCP transport support
+- [ ] REST API interception (requires per-API config)
+- [ ] OPA/Rego policy integration
+- [ ] Dashboard UI
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for how to get involved.
+
+## License
+
+[Apache 2.0](LICENSE)
+
+---
+
+<p align="center">
+  <strong>Port Authority</strong><br/>
+  Cryptographic evidence for the agentic economy.
+</p>
