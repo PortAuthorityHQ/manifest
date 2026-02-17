@@ -60,6 +60,8 @@ cargo test -p manifest-proxy   # Test just proxy
 | Prune command | `manifest-cli/src/commands/prune.rs` |
 | Watch command | `manifest-cli/src/commands/watch.rs` |
 | Alert config | `manifest-proxy/src/receipt_builder.rs` (AlertConfig, emit_violation_alert) |
+| Homebrew formula | `Formula/manifest.rb` |
+| npm wrapper | `npm/package.json`, `npm/install.js` |
 
 ## Conventions
 
@@ -96,3 +98,6 @@ cargo test -p manifest-proxy   # Test just proxy
 - HTTP proxy reqwest client has explicit `connect_timeout(5s)` and `timeout(30s)`. Body reads also have a 30s timeout returning 504 GATEWAY_TIMEOUT.
 - HTTP proxy caps at 10,000 concurrent sessions (`MAX_SESSIONS`). New sessions beyond the cap get 503. Session cleanup happens on DELETE regardless of upstream success.
 - `escape_html` in export.rs escapes `&` first to prevent double-escaping. Order matters — don't reorder the replace chain.
+- `Proof.countersignatures` is `Option<Vec<Countersignature>>` — always `None` in the open-source CLI. Reserved for future Cloud Vault co-signing. The field is excluded from `canonical_bytes()` and `content_hash()`, so adding countersignatures never invalidates existing signatures.
+- Homebrew formula is in `Formula/manifest.rb`. SHA256 checksums are placeholders — update them at each release.
+- npm wrapper is in `npm/`. The `install.js` script downloads the right binary on `postinstall`. Requires a published GitHub release to work.

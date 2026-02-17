@@ -1,0 +1,33 @@
+{
+  "name": "@portauthority/manifest",
+  "version": "0.1.0",
+  "description": "Cryptographic receipts for AI agent tool calls",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/port-authority/manifest"
+  },
+  "homepage": "https://github.com/port-authority/manifest",
+  "keywords": [
+    "ai",
+    "agent",
+    "mcp",
+    "audit",
+    "cryptographic",
+    "receipts",
+    "compliance"
+  ],
+  "bin": {
+    "manifest": "bin/manifest"
+  },
+  "scripts": {
+    "postinstall": "node install.js"
+  },
+  "files": [
+    "install.js",
+    "bin/"
+  ],
+  "engines": {
+    "node": ">=16"
+  }
+}

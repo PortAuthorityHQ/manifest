@@ -47,7 +47,25 @@ AI agents are moving money, accessing PII, and making consequential decisions. B
 
 ## Installation
 
-### Pre-built binaries (recommended)
+### Homebrew (macOS / Linux)
+
+```bash
+brew tap port-authority/manifest
+brew install manifest
+```
+
+### npm / npx
+
+```bash
+# Run directly without installing
+npx @portauthority/manifest init
+
+# Or install globally
+npm install -g @portauthority/manifest
+manifest init
+```
+
+### Pre-built binaries
 
 Download the latest release for your platform from [GitHub Releases](https://github.com/port-authority/manifest/releases):
 
@@ -429,6 +447,7 @@ This is still more than any enterprise currently has.
 - [ ] OPA/Rego policy integration
 - [ ] REST/gRPC API interception
 - [ ] HSM/KMS key management (key rotation, cloud KMS integration)
+- [ ] Third-party countersignatures (Cloud Vault co-signing for legal non-repudiation)
 - [ ] Dashboard UI
 - [ ] Verified identity (SPIFFE/SVID, mTLS certificate chain)
 

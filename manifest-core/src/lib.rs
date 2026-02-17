@@ -15,7 +15,7 @@ pub use hashing::{sha256, sha256_hex};
 pub use identity::{AgentIdentity, IdentitySource};
 pub use merkle::MerkleTree;
 pub use policy::{PolicyConfig, PolicyRule, PolicySnapshot};
-pub use proof::Proof;
+pub use proof::{Countersignature, Proof};
 pub use receipt::{Receipt, ReceiptBuilder};
 pub use signing::{load_public_key, verify_with_public_key, Signer};
 pub use storage::{Storage, StorageBackend};

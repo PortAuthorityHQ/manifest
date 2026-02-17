@@ -168,6 +168,7 @@ impl ReceiptBuilder {
                 signature: String::new(),
                 merkle_root: String::new(),
                 previous_receipt: self.previous_receipt,
+                countersignatures: None,
             },
         };
 
