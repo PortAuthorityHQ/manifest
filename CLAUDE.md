@@ -14,7 +14,7 @@ Cargo workspace with 3 crates + 1 test binary:
 manifest-core/     — Receipt types, crypto (Ed25519, SHA-256, Merkle), SQLite storage. No async, no tokio.
 manifest-proxy/    — Async stdio + HTTP relay, JSON-RPC parsing, MCP interception, receipt worker.
 manifest-cli/      — Binary entry point + clap subcommands. Thin shell over core + proxy.
-mock-mcp-server/   — Test MCP server with echo/add/db_query/fail/slow tools.
+mock-mcp-server/   — Test MCP server with echo/add/db_query/fail/slow tools. Supports both stdio and --http mode.
 ```
 
 **Dependency direction**: cli → proxy → core. Core has zero async dependencies.
@@ -33,8 +33,9 @@ mock-mcp-server/   — Test MCP server with echo/add/db_query/fail/slow tools.
 
 ```bash
 cargo build                    # Build all crates
-cargo test                     # Run all 88+ unit tests
-bash tests/e2e.sh              # Full end-to-end test (build + proxy + receipts + verify)
+cargo test                     # Run all 94+ unit tests
+bash tests/e2e.sh              # Stdio e2e test (build + proxy + receipts + verify + policy)
+bash tests/e2e_http.sh         # HTTP e2e test (build + HTTP proxy + receipts + verify + auth)
 cargo test -p manifest-core    # Test just core
 cargo test -p manifest-proxy   # Test just proxy
 ```
@@ -54,7 +55,9 @@ cargo test -p manifest-proxy   # Test just proxy
 | Receipt worker | `manifest-proxy/src/receipt_builder.rs` |
 | MCP session state | `manifest-proxy/src/session.rs` |
 | CLI entry point | `manifest-cli/src/main.rs` |
-| E2E test | `tests/e2e.sh` |
+| E2E test (stdio) | `tests/e2e.sh` |
+| E2E test (HTTP) | `tests/e2e_http.sh` |
+| Prune command | `manifest-cli/src/commands/prune.rs` |
 
 ## Conventions
 
@@ -74,3 +77,7 @@ cargo test -p manifest-proxy   # Test just proxy
 - Graceful shutdown: when the relay exits, `receipt_tx` is dropped, closing the channel. The receipt worker drains remaining items. The proxy awaits this with a 10s timeout.
 - Payload truncation happens in the receipt worker (blocking thread), not in the relay. The relay always forwards full payloads.
 - Policy `pii-flag` does substring matching (fast, false positives). Policy `pii-regex` does regex matching (precise, slower). Both can coexist.
+- HTTP proxy uses per-session state keyed by `Mcp-Session-Id` header. Stdio proxy uses a single shared session. The receipt worker handles both via optional `SessionInfo` on `CapturedToolCall`.
+- Regex patterns in `PolicyConfig` are compiled once via `OnceLock` and cached. Don't construct `PolicyConfig` with struct literal — use `PolicyConfig::new(vec![...])` to ensure the cache field is initialized.
+- `manifest prune` deletes receipts but NOT Merkle leaves — the Merkle tree is append-only by design.
+- HTTP proxy bearer token auth (`--token`) is middleware-based. When set, all requests need `Authorization: Bearer <token>` or get 401.

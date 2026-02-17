@@ -107,6 +107,12 @@ manifest export --session <session-id> --format json
 
 # Verify a receipt's signature, hash, and Merkle proof
 manifest verify <receipt-hash> --public-key ~/.manifest/signing.key.pub
+
+# Delete receipts older than 90 days
+manifest prune --older-than 90d
+
+# Dry run — see what would be deleted without deleting
+manifest prune --older-than 30d --dry-run
 ```
 
 ## The Receipt
@@ -287,9 +293,12 @@ manifest proxy-http --upstream http://localhost:9090/mcp --port 8080
 # With policy and identity
 manifest proxy-http --upstream http://mcp.example.com/mcp --port 8080 \
     --policy manifest.policy.yml --identity manifest.identity.yml
+
+# With bearer token authentication (rejects unauthenticated requests)
+manifest proxy-http --upstream http://localhost:9090/mcp --port 8080 --token my-secret-token
 ```
 
-Then point your agent at `http://localhost:8080/mcp` instead of the upstream server. The proxy handles POST, GET (SSE), and DELETE methods transparently.
+Then point your agent at `http://localhost:8080/mcp` instead of the upstream server. The proxy handles POST, GET (SSE), and DELETE methods transparently. When `--token` is set, all requests must include `Authorization: Bearer <token>` or receive a 401 response. Each concurrent client gets isolated session state via the `Mcp-Session-Id` header.
 
 ## Known Limitations
 
@@ -320,6 +329,8 @@ This is still more than any enterprise currently has.
 - [x] Receipt verification (`manifest verify` — signature, hash, Merkle proof, chain)
 - [x] HTTP/SSE MCP transport (`manifest proxy-http` — Streamable HTTP reverse proxy)
 - [x] Receipt size limits (auto-truncation of oversized payloads with hash reference)
+- [x] HTTP proxy authentication (bearer token + per-session state isolation)
+- [x] Database retention (`manifest prune --older-than 90d`)
 - [ ] REST API interception (requires per-API config)
 - [ ] OPA/Rego policy integration
 - [ ] Dashboard UI

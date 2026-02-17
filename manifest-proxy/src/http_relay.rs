@@ -9,6 +9,7 @@
 //! The JSON-RPC interception logic is identical to the stdio relay — only
 //! the framing layer (HTTP + SSE vs newline-delimited JSON) differs.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use axum::body::Body;
@@ -23,8 +24,15 @@ use tokio::sync::mpsc;
 use crate::jsonrpc::JsonRpcMessage;
 use crate::mcp;
 use crate::pending::PendingCallMap;
-use crate::receipt_builder::CapturedToolCall;
+use crate::receipt_builder::{extract_session_info, CapturedToolCall};
 use crate::session::McpSession;
+use manifest_core::{AgentIdentity, PolicyConfig};
+
+/// Per-session state, keyed by `Mcp-Session-Id` from the upstream server.
+struct PerSessionState {
+    session: McpSession,
+    pending: PendingCallMap,
+}
 
 /// Shared state for the HTTP proxy handlers.
 #[derive(Clone)]
@@ -33,12 +41,58 @@ pub struct HttpProxyState {
     pub upstream_url: String,
     /// HTTP client for forwarding requests.
     pub client: reqwest::Client,
-    /// MCP session state.
-    pub session: Arc<Mutex<McpSession>>,
-    /// Pending tool calls awaiting responses.
-    pub pending: Arc<Mutex<PendingCallMap>>,
+    /// Per-session state map, keyed by `Mcp-Session-Id`.
+    sessions: Arc<Mutex<HashMap<String, PerSessionState>>>,
+    /// Identity config (shared across all sessions).
+    identity_config: Option<AgentIdentity>,
+    /// Policy config (shared across all sessions).
+    policy_config: Option<PolicyConfig>,
     /// Channel to send captured tool calls to the receipt worker.
     pub receipt_tx: mpsc::UnboundedSender<CapturedToolCall>,
+    /// Optional bearer token for authentication. If set, all requests must
+    /// include `Authorization: Bearer <token>` or receive 401.
+    pub auth_token: Option<String>,
+}
+
+impl HttpProxyState {
+    /// Create a new HTTP proxy state.
+    pub fn new(
+        upstream_url: String,
+        identity_config: Option<AgentIdentity>,
+        policy_config: Option<PolicyConfig>,
+        receipt_tx: mpsc::UnboundedSender<CapturedToolCall>,
+        auth_token: Option<String>,
+    ) -> Self {
+        Self {
+            upstream_url,
+            client: reqwest::Client::new(),
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+            identity_config,
+            policy_config,
+            receipt_tx,
+            auth_token,
+        }
+    }
+
+    /// Get or create per-session state for the given session ID.
+    /// An empty string key is used as the "default" session for servers
+    /// that don't send `Mcp-Session-Id` headers.
+    fn get_or_create_session(&self, session_id: &str) {
+        let mut sessions = self.sessions.lock().unwrap();
+        if !sessions.contains_key(session_id) {
+            sessions.insert(
+                session_id.to_string(),
+                PerSessionState {
+                    session: McpSession::new(
+                        self.identity_config.clone(),
+                        self.policy_config.clone(),
+                    ),
+                    pending: PendingCallMap::new(),
+                },
+            );
+            tracing::debug!(session_id = %session_id, "created new per-session state");
+        }
+    }
 }
 
 /// Build the Axum router for the HTTP proxy.
@@ -47,14 +101,57 @@ pub struct HttpProxyState {
 /// The proxy forwards requests to the upstream server, intercepting
 /// JSON-RPC messages for receipt generation along the way.
 pub fn build_router(state: HttpProxyState) -> Router {
-    Router::new()
+    let router = Router::new()
         .route(
             "/mcp",
             axum::routing::post(handle_post)
                 .get(handle_get)
                 .delete(handle_delete),
-        )
-        .with_state(state)
+        );
+
+    // Add auth middleware if a token is configured
+    if state.auth_token.is_some() {
+        router
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                auth_middleware,
+            ))
+            .with_state(state)
+    } else {
+        router.with_state(state)
+    }
+}
+
+/// Middleware that validates the Bearer token on every request.
+async fn auth_middleware(
+    State(state): State<HttpProxyState>,
+    headers: HeaderMap,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let expected = match &state.auth_token {
+        Some(t) => t,
+        None => return next.run(request).await,
+    };
+
+    let provided = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "));
+
+    match provided {
+        Some(token) if token == expected => next.run(request).await,
+        _ => (StatusCode::UNAUTHORIZED, "missing or invalid bearer token").into_response(),
+    }
+}
+
+/// Extract the `Mcp-Session-Id` from headers, defaulting to empty string.
+fn extract_session_id(headers: &HeaderMap) -> String {
+    headers
+        .get("mcp-session-id")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string()
 }
 
 /// Handle POST requests — client sending JSON-RPC messages.
@@ -72,9 +169,13 @@ async fn handle_post(
         Err(_) => return (StatusCode::BAD_REQUEST, "invalid UTF-8").into_response(),
     };
 
+    // Determine the session ID from the request header (empty for initialize)
+    let req_session_id = extract_session_id(&headers);
+    state.get_or_create_session(&req_session_id);
+
     // Intercept the request (same logic as stdio relay)
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(body_str) {
-        intercept_request(&value, &state);
+        intercept_request(&value, &state, &req_session_id);
     }
 
     // Build the upstream request
@@ -115,6 +216,33 @@ async fn handle_post(
         .unwrap_or("")
         .to_string();
 
+    // Check if the upstream assigned a new session ID (happens on initialize response)
+    let upstream_session_id = resp_headers
+        .get("mcp-session-id")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+
+    // If the upstream assigned a session ID and the request had no session ID,
+    // migrate the default session state to the new key.
+    if !upstream_session_id.is_empty() && req_session_id.is_empty() {
+        let mut sessions = state.sessions.lock().unwrap();
+        if let Some(session_state) = sessions.remove("") {
+            sessions.insert(upstream_session_id.clone(), session_state);
+            tracing::debug!(
+                session_id = %upstream_session_id,
+                "migrated default session to upstream session ID"
+            );
+        }
+    }
+
+    // Use the upstream session ID for response interception if available
+    let resp_session_id = if !upstream_session_id.is_empty() {
+        &upstream_session_id
+    } else {
+        &req_session_id
+    };
+
     // Build response headers to forward back to the client
     let mut response_headers = HeaderMap::new();
     for key in &["content-type", "mcp-session-id", "mcp-protocol-version"] {
@@ -129,13 +257,14 @@ async fn handle_post(
         // SSE response — stream events through, intercepting each one
         let byte_stream = upstream_resp.bytes_stream();
         let state_clone = state.clone();
+        let sse_session_id = resp_session_id.to_string();
 
         let sse_stream = byte_stream.map(move |chunk| {
             match chunk {
                 Ok(bytes) => {
                     // Parse SSE events and intercept JSON-RPC messages
                     let text = String::from_utf8_lossy(&bytes);
-                    intercept_sse_chunk(&text, &state_clone);
+                    intercept_sse_chunk(&text, &state_clone, &sse_session_id);
                     Ok::<_, std::io::Error>(bytes)
                 }
                 Err(e) => Err(std::io::Error::new(std::io::ErrorKind::Other, e)),
@@ -157,7 +286,7 @@ async fn handle_post(
 
         if let Ok(text) = std::str::from_utf8(&resp_body) {
             if let Ok(value) = serde_json::from_str::<serde_json::Value>(text) {
-                intercept_response(&value, &state);
+                intercept_response(&value, &state, resp_session_id);
             }
         }
 
@@ -170,6 +299,7 @@ async fn handle_get(
     State(state): State<HttpProxyState>,
     headers: HeaderMap,
 ) -> Response {
+    let session_id = extract_session_id(&headers);
     let mut upstream_req = state.client.get(&state.upstream_url);
 
     for key in &["accept", "mcp-session-id", "mcp-protocol-version", "last-event-id"] {
@@ -205,7 +335,7 @@ async fn handle_get(
         match chunk {
             Ok(bytes) => {
                 let text = String::from_utf8_lossy(&bytes);
-                intercept_sse_chunk(&text, &state_clone);
+                intercept_sse_chunk(&text, &state_clone, &session_id);
                 Ok::<_, std::io::Error>(bytes)
             }
             Err(e) => Err(std::io::Error::new(std::io::ErrorKind::Other, e)),
@@ -241,12 +371,14 @@ async fn handle_delete(
 }
 
 /// Intercept an incoming JSON-RPC request (from the client POST body).
-fn intercept_request(value: &serde_json::Value, state: &HttpProxyState) {
+fn intercept_request(value: &serde_json::Value, state: &HttpProxyState, session_id: &str) {
     match JsonRpcMessage::parse(value.clone()) {
         Ok(JsonRpcMessage::Request(ref req)) if mcp::is_initialize(&req.method) => {
             if let Some(ref params) = req.params {
-                if let Ok(mut sess) = state.session.lock() {
-                    sess.on_initialize_request(params);
+                if let Ok(mut sessions) = state.sessions.lock() {
+                    if let Some(s) = sessions.get_mut(session_id) {
+                        s.session.on_initialize_request(params);
+                    }
                 }
             }
             tracing::debug!("intercepted initialize request (HTTP)");
@@ -254,8 +386,10 @@ fn intercept_request(value: &serde_json::Value, state: &HttpProxyState) {
         Ok(JsonRpcMessage::Request(ref req)) if mcp::is_tool_call(&req.method) => {
             if let Some(ref params) = req.params {
                 if let Some((tool_name, input)) = mcp::extract_tool_call(params) {
-                    if let Ok(mut p) = state.pending.lock() {
-                        p.insert(&req.id, tool_name.clone(), input);
+                    if let Ok(mut sessions) = state.sessions.lock() {
+                        if let Some(s) = sessions.get_mut(session_id) {
+                            s.pending.insert(&req.id, tool_name.clone(), input);
+                        }
                     }
                     tracing::debug!(tool = %tool_name, "intercepted tools/call request (HTTP)");
                 }
@@ -269,16 +403,18 @@ fn intercept_request(value: &serde_json::Value, state: &HttpProxyState) {
 }
 
 /// Intercept a JSON-RPC response (from the upstream server).
-fn intercept_response(value: &serde_json::Value, state: &HttpProxyState) {
+fn intercept_response(value: &serde_json::Value, state: &HttpProxyState, session_id: &str) {
     match JsonRpcMessage::parse(value.clone()) {
         Ok(JsonRpcMessage::Response(ref resp)) => {
             // Check for initialize response
             if let Some(ref result) = resp.result {
                 if result.get("serverInfo").is_some() {
-                    if let Ok(mut sess) = state.session.lock() {
-                        if !sess.initialized {
-                            sess.on_initialize_response(result);
-                            tracing::debug!("captured server capabilities (HTTP)");
+                    if let Ok(mut sessions) = state.sessions.lock() {
+                        if let Some(s) = sessions.get_mut(session_id) {
+                            if !s.session.initialized {
+                                s.session.on_initialize_response(result);
+                                tracing::debug!("captured server capabilities (HTTP)");
+                            }
                         }
                     }
                 }
@@ -286,14 +422,34 @@ fn intercept_response(value: &serde_json::Value, state: &HttpProxyState) {
 
             // Match against pending tool calls
             let pending_call = {
-                if let Ok(mut p) = state.pending.lock() {
-                    p.remove(&resp.id)
+                if let Ok(mut sessions) = state.sessions.lock() {
+                    sessions
+                        .get_mut(session_id)
+                        .and_then(|s| s.pending.remove(&resp.id))
                 } else {
                     None
                 }
             };
 
             if let Some(call) = pending_call {
+                // Extract session info now, while we have access to the session map
+                let session_info = {
+                    state
+                        .sessions
+                        .lock()
+                        .ok()
+                        .and_then(|sessions| {
+                            sessions.get(session_id).map(|s| {
+                                extract_session_info(
+                                    &s.session,
+                                    &call.tool_name,
+                                    &call.input,
+                                    resp.result.as_ref(),
+                                )
+                            })
+                        })
+                };
+
                 let captured = CapturedToolCall {
                     tool_name: call.tool_name.clone(),
                     input: call.input,
@@ -304,6 +460,7 @@ fn intercept_response(value: &serde_json::Value, state: &HttpProxyState) {
                         data: e.data.clone(),
                     }),
                     timestamp: call.timestamp,
+                    session_info,
                 };
 
                 if let Err(e) = state.receipt_tx.send(captured) {
@@ -328,7 +485,7 @@ fn intercept_response(value: &serde_json::Value, state: &HttpProxyState) {
 /// data: {"jsonrpc":"2.0", ...}
 ///
 /// ```
-fn intercept_sse_chunk(text: &str, state: &HttpProxyState) {
+fn intercept_sse_chunk(text: &str, state: &HttpProxyState, session_id: &str) {
     for line in text.lines() {
         let data = if let Some(stripped) = line.strip_prefix("data: ") {
             stripped
@@ -339,7 +496,7 @@ fn intercept_sse_chunk(text: &str, state: &HttpProxyState) {
         };
 
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(data) {
-            intercept_response(&value, state);
+            intercept_response(&value, state, session_id);
         }
     }
 }

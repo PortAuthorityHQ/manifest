@@ -185,6 +185,7 @@ async fn relay_child_to_agent(
                                 data: e.data.clone(),
                             }),
                             timestamp: call.timestamp,
+                            session_info: None, // stdio uses shared session
                         };
 
                         if let Err(e) = receipt_tx.send(captured) {

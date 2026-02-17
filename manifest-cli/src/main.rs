@@ -118,6 +118,10 @@ enum Commands {
         /// Path to the SQLite database
         #[arg(long)]
         db: Option<String>,
+
+        /// Bearer token for authentication (rejects unauthenticated requests)
+        #[arg(long)]
+        token: Option<String>,
     },
 
     /// Generate a new signing keypair
@@ -125,6 +129,21 @@ enum Commands {
         /// Path to store the keypair
         #[arg(long)]
         key: Option<String>,
+    },
+
+    /// Delete receipts older than a given duration
+    Prune {
+        /// Duration threshold (e.g., "90d", "24h", "30m")
+        #[arg(long)]
+        older_than: String,
+
+        /// Show what would be deleted without actually deleting
+        #[arg(long, default_value = "false")]
+        dry_run: bool,
+
+        /// Path to the SQLite database
+        #[arg(long)]
+        db: Option<String>,
     },
 }
 
@@ -161,7 +180,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Verify { hash, public_key, db } => {
             commands::verify::run(&hash, &public_key, db.as_deref())?;
         }
-        Commands::ProxyHttp { upstream, port, identity, policy, key, db } => {
+        Commands::ProxyHttp { upstream, port, identity, policy, key, db, token } => {
             commands::proxy_http::run(
                 &upstream,
                 port,
@@ -169,10 +188,14 @@ async fn main() -> anyhow::Result<()> {
                 policy.as_deref(),
                 key.as_deref(),
                 db.as_deref(),
+                token.as_deref(),
             ).await?;
         }
         Commands::Init { key } => {
             commands::init::run(key.as_deref())?;
+        }
+        Commands::Prune { older_than, dry_run, db } => {
+            commands::prune::run(&older_than, dry_run, db.as_deref())?;
         }
     }
 

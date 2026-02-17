@@ -165,11 +165,9 @@ mod tests {
 
     #[test]
     fn tool_check_with_allowlist() {
-        let policy = PolicyConfig {
-            policies: vec![manifest_core::PolicyRule::ToolAllowlist {
+        let policy = PolicyConfig::new(vec![manifest_core::PolicyRule::ToolAllowlist {
                 allowed_tools: vec!["db_query".into()],
-            }],
-        };
+            }]);
         let session = McpSession::new(None, Some(policy));
         let input = serde_json::json!({"query": "SELECT 1"});
 
@@ -183,16 +181,14 @@ mod tests {
 
     #[test]
     fn tool_check_spending_and_pii() {
-        let policy = PolicyConfig {
-            policies: vec![
+        let policy = PolicyConfig::new(vec![
                 manifest_core::PolicyRule::SpendingLimit {
                     max_transaction_value: 1000,
                 },
                 manifest_core::PolicyRule::PiiFlag {
                     flag_if_contains: vec!["SSN".into()],
                 },
-            ],
-        };
+            ]);
         let session = McpSession::new(None, Some(policy));
 
         // High value + PII = 2 violations

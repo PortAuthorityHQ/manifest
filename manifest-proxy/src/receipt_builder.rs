@@ -8,6 +8,44 @@ use tokio::sync::mpsc;
 
 use crate::session::McpSession;
 
+/// Pre-extracted session state carried with each captured tool call.
+///
+/// For stdio, this is extracted from the single session. For HTTP,
+/// this is extracted from the per-session map at interception time.
+pub struct SessionInfo {
+    pub identity: manifest_core::AgentIdentity,
+    pub policy_snapshot: Option<manifest_core::PolicySnapshot>,
+    pub session_id: String,
+    pub delta: Option<manifest_core::receipt::Delta>,
+}
+
+/// Extract session info from an `McpSession` for a given tool call.
+pub fn extract_session_info(
+    session: &McpSession,
+    tool_name: &str,
+    input: &serde_json::Value,
+    output: Option<&serde_json::Value>,
+) -> SessionInfo {
+    let identity = session.identity();
+    let policy_snapshot = session.policy_snapshot();
+    let session_id = session.session_id.clone();
+    let (authorized, violations) = session.check_tool(tool_name, input, output);
+    let delta = if policy_snapshot.is_some() {
+        Some(manifest_core::receipt::Delta {
+            authorized,
+            violations,
+        })
+    } else {
+        None
+    };
+    SessionInfo {
+        identity,
+        policy_snapshot,
+        session_id,
+        delta,
+    }
+}
+
 /// A captured tool call ready for receipt generation.
 pub struct CapturedToolCall {
     pub tool_name: String,
@@ -15,6 +53,9 @@ pub struct CapturedToolCall {
     pub output: Option<serde_json::Value>,
     pub error: Option<ActionError>,
     pub timestamp: DateTime<Utc>,
+    /// Pre-extracted session info. If `None`, the receipt worker extracts
+    /// it from the shared session (stdio mode).
+    pub session_info: Option<SessionInfo>,
 }
 
 /// Background worker that consumes captured tool calls and generates signed receipts.
@@ -23,6 +64,10 @@ pub struct CapturedToolCall {
 /// captured call: extracts session state on the async side, then offloads
 /// signing + SQLite writes to a blocking thread via `spawn_blocking` to
 /// avoid blocking the tokio runtime.
+///
+/// The `session` parameter is used for stdio mode where there's a single
+/// shared session. For HTTP mode, session info is pre-extracted and carried
+/// in `CapturedToolCall.session_info`.
 pub async fn receipt_worker(
     mut rx: mpsc::UnboundedReceiver<CapturedToolCall>,
     session: Arc<Mutex<McpSession>>,
@@ -30,9 +75,13 @@ pub async fn receipt_worker(
     merkle: Arc<Mutex<MerkleTree>>,
     storage: Arc<Mutex<Storage>>,
 ) {
-    while let Some(captured) = rx.recv().await {
-        // Extract session state synchronously (fast, no IO)
-        let session_state = {
+    while let Some(mut captured) = rx.recv().await {
+        // Use pre-extracted session info if available (HTTP mode),
+        // otherwise extract from the shared session (stdio mode).
+        let pre_extracted = captured.session_info.take();
+        let session_state = if let Some(info) = pre_extracted {
+            (info.identity, info.policy_snapshot, info.session_id, info.delta)
+        } else {
             let sess = match session.lock() {
                 Ok(s) => s,
                 Err(e) => {
@@ -40,25 +89,13 @@ pub async fn receipt_worker(
                     continue;
                 }
             };
-
-            let identity = sess.identity();
-            let policy_snapshot = sess.policy_snapshot();
-            let session_id = sess.session_id.clone();
-            let (authorized, violations) = sess.check_tool(
+            let info = extract_session_info(
+                &sess,
                 &captured.tool_name,
                 &captured.input,
                 captured.output.as_ref(),
             );
-            let delta = if policy_snapshot.is_some() {
-                Some(manifest_core::receipt::Delta {
-                    authorized,
-                    violations,
-                })
-            } else {
-                None
-            };
-
-            (identity, policy_snapshot, session_id, delta)
+            (info.identity, info.policy_snapshot, info.session_id, info.delta)
         };
 
         // Offload signing + hashing + SQLite writes to a blocking thread

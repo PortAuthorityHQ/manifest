@@ -5,7 +5,6 @@ use manifest_core::{
     AgentIdentity, ManifestError, MerkleTree, PolicyConfig, Signer, Storage,
 };
 use manifest_proxy::http_relay::{build_router, HttpProxyState};
-use manifest_proxy::pending::PendingCallMap;
 use manifest_proxy::receipt_builder::receipt_worker;
 use manifest_proxy::session::McpSession;
 use tokio::sync::mpsc;
@@ -20,6 +19,7 @@ pub async fn run(
     policy_path: Option<&str>,
     key_path: Option<&str>,
     db_path: Option<&str>,
+    auth_token: Option<&str>,
 ) -> Result<(), ManifestError> {
     let key_file = resolve_key_path(key_path);
     let db_file = resolve_db_path(db_path);
@@ -68,35 +68,38 @@ pub async fn run(
         None => None,
     };
 
-    // Create session and receipt channel
-    let session = Arc::new(Mutex::new(McpSession::new(identity, policy)));
+    // Create a dummy session for the receipt worker (HTTP mode uses per-session
+    // state via session_info on CapturedToolCall, so this is only a fallback).
+    let dummy_session = Arc::new(Mutex::new(McpSession::new(identity.clone(), policy.clone())));
     let (receipt_tx, receipt_rx) = mpsc::unbounded_channel();
 
     // Start background receipt worker
     let worker_handle = tokio::spawn({
-        let session = session.clone();
         let signer = signer.clone();
         let merkle = merkle.clone();
         let storage = storage.clone();
         async move {
-            receipt_worker(receipt_rx, session, signer, merkle, storage).await;
+            receipt_worker(receipt_rx, dummy_session, signer, merkle, storage).await;
         }
     });
 
-    // Build the HTTP proxy
-    let state = HttpProxyState {
-        upstream_url: upstream_url.to_string(),
-        client: reqwest::Client::new(),
-        session,
-        pending: Arc::new(Mutex::new(PendingCallMap::new())),
+    // Build the HTTP proxy with per-session state map
+    let state = HttpProxyState::new(
+        upstream_url.to_string(),
+        identity,
+        policy,
         receipt_tx,
-    };
+        auth_token.map(|s| s.to_string()),
+    );
 
     let app = build_router(state);
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
 
     eprintln!("Manifest HTTP proxy listening on http://{addr}");
     eprintln!("Upstream MCP server: {upstream_url}");
+    if auth_token.is_some() {
+        eprintln!("Authentication: Bearer token required");
+    }
 
     let listener = tokio::net::TcpListener::bind(addr)
         .await

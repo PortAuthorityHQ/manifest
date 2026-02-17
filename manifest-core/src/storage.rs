@@ -196,6 +196,25 @@ impl Storage {
         Ok(leaves)
     }
 
+    /// Delete receipts older than the given timestamp.
+    ///
+    /// Returns the number of receipts deleted. Note: this does NOT prune
+    /// Merkle leaves — the Merkle tree is append-only by design.
+    pub fn prune_before(&self, cutoff: &str) -> Result<usize, ManifestError> {
+        let deleted = self.conn.execute(
+            "DELETE FROM receipts WHERE timestamp < ?1",
+            params![cutoff],
+        )?;
+        Ok(deleted)
+    }
+
+    /// Count total receipts in the database.
+    pub fn count_receipts(&self) -> Result<usize, ManifestError> {
+        let mut stmt = self.conn.prepare("SELECT COUNT(*) FROM receipts")?;
+        let count: i64 = stmt.query_row([], |row| row.get(0))?;
+        Ok(count as usize)
+    }
+
     /// Get the content hash of the most recent receipt (for chaining).
     pub fn latest_receipt_hash(&self) -> Result<Option<String>, ManifestError> {
         let mut stmt = self
@@ -345,6 +364,44 @@ mod tests {
 
         let latest = storage.latest_receipt_hash().unwrap().unwrap();
         assert_eq!(latest, expected_hash);
+    }
+
+    #[test]
+    fn prune_before() {
+        let storage = Storage::in_memory().unwrap();
+        let signer = Signer::generate();
+        let mut merkle = MerkleTree::new();
+
+        for tool in ["a", "b", "c"] {
+            let receipt = make_receipt(&signer, &mut merkle, tool);
+            storage.insert_receipt(&receipt, None).unwrap();
+        }
+
+        assert_eq!(storage.count_receipts().unwrap(), 3);
+
+        // Prune with a future cutoff deletes everything
+        let future = "9999-12-31T23:59:59Z";
+        let deleted = storage.prune_before(future).unwrap();
+        assert_eq!(deleted, 3);
+        assert_eq!(storage.count_receipts().unwrap(), 0);
+    }
+
+    #[test]
+    fn prune_before_keeps_recent() {
+        let storage = Storage::in_memory().unwrap();
+        let signer = Signer::generate();
+        let mut merkle = MerkleTree::new();
+
+        for tool in ["a", "b", "c"] {
+            let receipt = make_receipt(&signer, &mut merkle, tool);
+            storage.insert_receipt(&receipt, None).unwrap();
+        }
+
+        // Prune with a past cutoff deletes nothing
+        let past = "2000-01-01T00:00:00Z";
+        let deleted = storage.prune_before(past).unwrap();
+        assert_eq!(deleted, 0);
+        assert_eq!(storage.count_receipts().unwrap(), 3);
     }
 
     #[test]

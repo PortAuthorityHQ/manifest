@@ -1,3 +1,5 @@
+use std::sync::OnceLock;
+
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
@@ -18,9 +20,27 @@ pub struct PolicySnapshot {
 }
 
 /// Top-level policy configuration loaded from YAML.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct PolicyConfig {
     pub policies: Vec<PolicyRule>,
+
+    /// Cached compiled regex patterns. Compiled once on first `evaluate()`.
+    #[serde(skip)]
+    compiled_regex: OnceLock<Vec<(String, Regex)>>,
+}
+
+impl Clone for PolicyConfig {
+    fn clone(&self) -> Self {
+        let new = Self {
+            policies: self.policies.clone(),
+            compiled_regex: OnceLock::new(),
+        };
+        // If already compiled, carry over to the clone
+        if let Some(patterns) = self.compiled_regex.get() {
+            let _ = new.compiled_regex.set(patterns.clone());
+        }
+        new
+    }
 }
 
 /// Individual policy rules.
@@ -53,6 +73,14 @@ pub enum PolicyRule {
 }
 
 impl PolicyConfig {
+    /// Create a new `PolicyConfig` from a list of rules.
+    pub fn new(policies: Vec<PolicyRule>) -> Self {
+        Self {
+            policies,
+            compiled_regex: OnceLock::new(),
+        }
+    }
+
     /// Load policy configuration from a YAML file.
     pub fn load(path: &std::path::Path) -> Result<Self, ManifestError> {
         let contents = std::fs::read_to_string(path)?;
@@ -101,6 +129,28 @@ impl PolicyConfig {
             }
         }
         None
+    }
+
+    /// Get or compile the cached regex patterns from all `PiiRegex` rules.
+    fn compiled_patterns(&self) -> &[(String, Regex)] {
+        self.compiled_regex.get_or_init(|| {
+            let mut patterns = Vec::new();
+            for rule in &self.policies {
+                if let PolicyRule::PiiRegex { builtin, custom } = rule {
+                    for name in builtin {
+                        if let Some(re) = builtin_pii_regex(name) {
+                            patterns.push((name.clone(), re));
+                        }
+                    }
+                    for (label, pattern) in custom {
+                        if let Ok(re) = Regex::new(pattern) {
+                            patterns.push((label.clone(), re));
+                        }
+                    }
+                }
+            }
+            patterns
+        })
     }
 
     /// Evaluate all policy rules against a tool call.
@@ -155,27 +205,12 @@ impl PolicyConfig {
                         }
                     }
                 }
-                PolicyRule::PiiRegex { builtin, custom } => {
-                    let mut patterns: Vec<(String, Regex)> = Vec::new();
-
-                    // Load built-in patterns
-                    for name in builtin {
-                        if let Some(re) = builtin_pii_regex(name) {
-                            patterns.push((name.clone(), re));
-                        }
-                        // Unknown built-in names are silently skipped
-                    }
-
-                    // Load custom patterns
-                    for (label, pattern) in custom {
-                        if let Ok(re) = Regex::new(pattern) {
-                            patterns.push((label.clone(), re));
-                        }
-                        // Invalid regex patterns are silently skipped
-                    }
+                PolicyRule::PiiRegex { .. } => {
+                    // Use cached compiled patterns instead of recompiling
+                    let patterns = self.compiled_patterns();
 
                     let input_str = input.to_string();
-                    for (label, re) in &patterns {
+                    for (label, re) in patterns {
                         if re.is_match(&input_str) {
                             violations.push(format!("pii_regex_match_in_input: '{label}'"));
                         }
@@ -183,7 +218,7 @@ impl PolicyConfig {
 
                     if let Some(out) = output {
                         let output_str = out.to_string();
-                        for (label, re) in &patterns {
+                        for (label, re) in patterns {
                             if re.is_match(&output_str) {
                                 violations.push(format!("pii_regex_match_in_output: '{label}'"));
                             }
@@ -271,16 +306,14 @@ policies:
 
     #[test]
     fn policy_snapshot() {
-        let config = PolicyConfig {
-            policies: vec![
+        let config = PolicyConfig::new(vec![
                 PolicyRule::SpendingLimit {
                     max_transaction_value: 10000,
                 },
                 PolicyRule::ToolAllowlist {
                     allowed_tools: vec!["read_file".into()],
                 },
-            ],
-        };
+            ]);
 
         let snapshot = config.to_snapshot();
         assert_eq!(snapshot.max_transaction_value, Some(10000));
@@ -290,11 +323,9 @@ policies:
 
     #[test]
     fn tool_allowlist_check() {
-        let config = PolicyConfig {
-            policies: vec![PolicyRule::ToolAllowlist {
+        let config = PolicyConfig::new(vec![PolicyRule::ToolAllowlist {
                 allowed_tools: vec!["db_query".into(), "send_email".into()],
-            }],
-        };
+            }]);
 
         assert_eq!(config.is_tool_allowed("db_query"), Some(true));
         assert_eq!(config.is_tool_allowed("drop_table"), Some(false));
@@ -302,21 +333,17 @@ policies:
 
     #[test]
     fn no_allowlist_returns_none() {
-        let config = PolicyConfig {
-            policies: vec![PolicyRule::SpendingLimit {
+        let config = PolicyConfig::new(vec![PolicyRule::SpendingLimit {
                 max_transaction_value: 5000,
-            }],
-        };
+            }]);
         assert_eq!(config.is_tool_allowed("anything"), None);
     }
 
     #[test]
     fn evaluate_spending_limit_violation() {
-        let config = PolicyConfig {
-            policies: vec![PolicyRule::SpendingLimit {
+        let config = PolicyConfig::new(vec![PolicyRule::SpendingLimit {
                 max_transaction_value: 10000,
-            }],
-        };
+            }]);
 
         let input = serde_json::json!({"amount": 50000, "currency": "USD"});
         let violations = config.evaluate("transfer", &input, None);
@@ -327,11 +354,9 @@ policies:
 
     #[test]
     fn evaluate_spending_limit_nested() {
-        let config = PolicyConfig {
-            policies: vec![PolicyRule::SpendingLimit {
+        let config = PolicyConfig::new(vec![PolicyRule::SpendingLimit {
                 max_transaction_value: 1000,
-            }],
-        };
+            }]);
 
         let input = serde_json::json!({
             "order": {
@@ -346,11 +371,9 @@ policies:
 
     #[test]
     fn evaluate_spending_limit_passes() {
-        let config = PolicyConfig {
-            policies: vec![PolicyRule::SpendingLimit {
+        let config = PolicyConfig::new(vec![PolicyRule::SpendingLimit {
                 max_transaction_value: 10000,
-            }],
-        };
+            }]);
 
         let input = serde_json::json!({"amount": 500});
         let violations = config.evaluate("transfer", &input, None);
@@ -359,11 +382,9 @@ policies:
 
     #[test]
     fn evaluate_pii_in_input() {
-        let config = PolicyConfig {
-            policies: vec![PolicyRule::PiiFlag {
+        let config = PolicyConfig::new(vec![PolicyRule::PiiFlag {
                 flag_if_contains: vec!["SSN".into(), "credit_card".into()],
-            }],
-        };
+            }]);
 
         let input = serde_json::json!({"query": "SELECT ssn FROM users"});
         let violations = config.evaluate("db_query", &input, None);
@@ -374,11 +395,9 @@ policies:
 
     #[test]
     fn evaluate_pii_in_output() {
-        let config = PolicyConfig {
-            policies: vec![PolicyRule::PiiFlag {
+        let config = PolicyConfig::new(vec![PolicyRule::PiiFlag {
                 flag_if_contains: vec!["credit_card".into()],
-            }],
-        };
+            }]);
 
         let input = serde_json::json!({"query": "SELECT * FROM payments"});
         let output = serde_json::json!({"rows": [{"credit_card": "4111-1111-1111"}]});
@@ -389,11 +408,9 @@ policies:
 
     #[test]
     fn evaluate_no_pii() {
-        let config = PolicyConfig {
-            policies: vec![PolicyRule::PiiFlag {
+        let config = PolicyConfig::new(vec![PolicyRule::PiiFlag {
                 flag_if_contains: vec!["SSN".into()],
-            }],
-        };
+            }]);
 
         let input = serde_json::json!({"query": "SELECT name FROM users"});
         let violations = config.evaluate("db_query", &input, None);
@@ -402,8 +419,7 @@ policies:
 
     #[test]
     fn evaluate_multiple_rules() {
-        let config = PolicyConfig {
-            policies: vec![
+        let config = PolicyConfig::new(vec![
                 PolicyRule::ToolAllowlist {
                     allowed_tools: vec!["db_query".into()],
                 },
@@ -413,8 +429,7 @@ policies:
                 PolicyRule::PiiFlag {
                     flag_if_contains: vec!["SSN".into()],
                 },
-            ],
-        };
+            ]);
 
         // Disallowed tool, high value, and PII
         let input = serde_json::json!({"amount": 5000, "field": "ssn"});
@@ -424,12 +439,10 @@ policies:
 
     #[test]
     fn evaluate_pii_regex_ssn() {
-        let config = PolicyConfig {
-            policies: vec![PolicyRule::PiiRegex {
+        let config = PolicyConfig::new(vec![PolicyRule::PiiRegex {
                 builtin: vec!["ssn".into()],
                 custom: std::collections::HashMap::new(),
-            }],
-        };
+            }]);
 
         // Actual SSN format triggers
         let input = serde_json::json!({"data": "SSN is 123-45-6789"});
@@ -441,12 +454,10 @@ policies:
 
     #[test]
     fn evaluate_pii_regex_no_false_positive() {
-        let config = PolicyConfig {
-            policies: vec![PolicyRule::PiiRegex {
+        let config = PolicyConfig::new(vec![PolicyRule::PiiRegex {
                 builtin: vec!["ssn".into()],
                 custom: std::collections::HashMap::new(),
-            }],
-        };
+            }]);
 
         // The word "assign" contains "ssn" as a substring but should NOT trigger
         // the regex detector (unlike the naive string-match PiiFlag)
@@ -457,12 +468,10 @@ policies:
 
     #[test]
     fn evaluate_pii_regex_credit_card() {
-        let config = PolicyConfig {
-            policies: vec![PolicyRule::PiiRegex {
+        let config = PolicyConfig::new(vec![PolicyRule::PiiRegex {
                 builtin: vec!["credit_card".into()],
                 custom: std::collections::HashMap::new(),
-            }],
-        };
+            }]);
 
         let input = serde_json::json!({"card": "4111111111111111"});
         let violations = config.evaluate("payment", &input, None);
@@ -472,12 +481,10 @@ policies:
 
     #[test]
     fn evaluate_pii_regex_email() {
-        let config = PolicyConfig {
-            policies: vec![PolicyRule::PiiRegex {
+        let config = PolicyConfig::new(vec![PolicyRule::PiiRegex {
                 builtin: vec!["email".into()],
                 custom: std::collections::HashMap::new(),
-            }],
-        };
+            }]);
 
         let output = serde_json::json!({"result": "Contact: user@example.com"});
         let input = serde_json::json!({});
@@ -491,12 +498,10 @@ policies:
         let mut custom = std::collections::HashMap::new();
         custom.insert("passport".into(), r"\b[A-Z]\d{8}\b".into());
 
-        let config = PolicyConfig {
-            policies: vec![PolicyRule::PiiRegex {
+        let config = PolicyConfig::new(vec![PolicyRule::PiiRegex {
                 builtin: vec![],
                 custom,
-            }],
-        };
+            }]);
 
         let input = serde_json::json!({"doc": "Passport: A12345678"});
         let violations = config.evaluate("verify", &input, None);
@@ -506,12 +511,10 @@ policies:
 
     #[test]
     fn evaluate_pii_regex_phone() {
-        let config = PolicyConfig {
-            policies: vec![PolicyRule::PiiRegex {
+        let config = PolicyConfig::new(vec![PolicyRule::PiiRegex {
                 builtin: vec!["phone".into()],
                 custom: std::collections::HashMap::new(),
-            }],
-        };
+            }]);
 
         let input = serde_json::json!({"contact": "Call (555) 123-4567"});
         let violations = config.evaluate("lookup", &input, None);
@@ -521,11 +524,9 @@ policies:
 
     #[test]
     fn snapshot_hash_is_deterministic() {
-        let config = PolicyConfig {
-            policies: vec![PolicyRule::SpendingLimit {
+        let config = PolicyConfig::new(vec![PolicyRule::SpendingLimit {
                 max_transaction_value: 100,
-            }],
-        };
+            }]);
         assert_eq!(config.snapshot_hash(), config.snapshot_hash());
     }
 }
