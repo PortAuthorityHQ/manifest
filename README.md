@@ -81,7 +81,7 @@ Each tool interaction produces a JSON-LD receipt containing four layers:
 
 | Layer | What It Captures | How |
 |-------|-----------------|-----|
-| **Identity** | Who is the agent? Who deployed it? | SPIFFE/SVID certificate |
+| **Identity** | Who is the agent? Who deployed it? | Auto-detected or declared (see [Agent Identity](#agent-identity)) |
 | **Policy** | What was it authorized to do at this moment? | YAML config or OPA/Rego (optional) |
 | **Action** | What did it actually send and receive? | Input params + tool output |
 | **Proof** | Cryptographic seal binding it all together | Ed25519 signature + Merkle root |
@@ -94,8 +94,10 @@ Example receipt (simplified):
   "id": "urn:uuid:01956a3b-...",
   "timestamp": "2026-02-16T14:23:01.847Z",
   "agent": {
-    "spiffeId": "spiffe://acme.com/agent/procurement-bot",
-    "deployer": "acme-corp"
+    "name": "procurement-bot",
+    "deployer": "acme-corp",
+    "source": "config",
+    "verified": false
   },
   "policy": {
     "maxTransactionValue": 50000,
@@ -138,6 +140,37 @@ Errors get receipts too. If a tool call fails, times out, or the server crashes 
 ```
 
 If you instructed "authorize up to $50K" and the agent submitted a tool call for $100K — the delta is right there, cryptographically sealed, with the policy that was active at that exact moment.
+
+## Agent Identity
+
+Every receipt includes an identity field. How it gets populated depends on what's available:
+
+| Source | How It Works | `verified` |
+|--------|-------------|------------|
+| **MCP client info** | Auto-extracted from the `initialize` handshake (`clientInfo.name`, `clientInfo.version`) | `false` |
+| **Config file** | Declared in `manifest.identity.yml` (agent name, deployer, environment) | `false` |
+| **Environment** | Falls back to process name, PID, and hostname | `false` |
+| **SPIFFE/SVID** *(enterprise)* | Cryptographically verified via mTLS certificate chain | `true` |
+
+In the open-source version, identity is **self-declared** — useful for debugging, tracing, and distinguishing between agents, but not cryptographically verified. The receipt is honest about this: `"verified": false`.
+
+The receipt schema is the same regardless of source. When you upgrade to verified identity, the field flips to `"verified": true` with a certificate chain. No schema migration. No receipt format change.
+
+Configure identity explicitly:
+
+```yaml
+# manifest.identity.yml
+agent:
+  name: "procurement-bot"
+  deployer: "acme-corp"
+  environment: "production"
+```
+
+```bash
+npx @port-authority/manifest --server "your-server" --identity manifest.identity.yml
+```
+
+Without a config file, `manifest` auto-populates identity from the MCP `initialize` handshake and the runtime environment. Every receipt always has an identity field — it's never empty.
 
 ## Performance
 
@@ -204,6 +237,7 @@ This is still more than any enterprise currently has.
 - [x] stdio MCP proxy (spawn + intercept)
 - [x] Receipt generation (JSON-LD + Ed25519 + Merkle tree)
 - [x] CLI tooling (`log`, `inspect`, `export`)
+- [x] Agent identity (auto-detect from MCP handshake + config file + environment)
 - [ ] YAML policy engine (spending limits, tool allowlists, PII flags)
 - [ ] HTTP/SSE MCP transport support
 - [ ] REST API interception (requires per-API config)
