@@ -45,22 +45,53 @@ AI agents are moving money, accessing PII, and making consequential decisions. B
 3. **Sign & Seal** — Buffers the complete response, then bundles identity, policy, action, and result into a signed JSON-LD receipt with Merkle tree linkage.
 4. **Forward** — Passes traffic through. Signing happens asynchronously after the response is forwarded to minimize added latency.
 
+## Installation
+
+Requires [Rust](https://rustup.rs/) (1.70+).
+
+```bash
+# Clone and build
+git clone https://github.com/port-authority/manifest.git
+cd manifest
+cargo build --release
+
+# The binary is at target/release/manifest
+# Optionally, install it to your PATH:
+cargo install --path manifest-cli
+```
+
 ## Quick Start
 
 Wrap any existing MCP server. `manifest` spawns it as a child process and intercepts all tool calls over stdio:
 
 ```bash
-# Install
-npm install -g @port-authority/manifest
+# Build from source
+cargo build --release
+
+# Generate a signing keypair
+manifest init
 
 # Wrap a local Postgres MCP server
-npx @port-authority/manifest --server "npx @modelcontextprotocol/server-postgres"
+manifest proxy --server "npx @modelcontextprotocol/server-postgres postgresql://localhost/mydb"
 
 # Wrap any MCP server
-npx @port-authority/manifest --server "your-mcp-server-command"
+manifest proxy --server "your-mcp-server-command"
 ```
 
-Point your agent's MCP client config at `manifest` instead of the server directly. Everything else works the same — your agent doesn't know it's being recorded.
+Point your agent's MCP client config at `manifest` instead of the server directly:
+
+```json
+{
+  "mcpServers": {
+    "postgres": {
+      "command": "manifest",
+      "args": ["proxy", "--server", "npx @modelcontextprotocol/server-postgres postgresql://localhost/mydb"]
+    }
+  }
+}
+```
+
+Everything else works the same — your agent doesn't know it's being recorded.
 
 Receipts are generated on every `tools/call`. Query them via the CLI:
 
@@ -107,8 +138,7 @@ Example receipt (simplified):
   "action": {
     "tool": "db_query",
     "input": { "query": "SELECT * FROM orders WHERE value > 10000" },
-    "output": { "rows": 42 },
-    "error": null
+    "output": { "rows": 42 }
   },
   "delta": {
     "authorized": true,
@@ -167,7 +197,7 @@ agent:
 ```
 
 ```bash
-npx @port-authority/manifest --server "your-server" --identity manifest.identity.yml
+manifest proxy --server "your-server" --identity manifest.identity.yml
 ```
 
 Without a config file, `manifest` auto-populates identity from the MCP `initialize` handshake and the runtime environment. Every receipt always has an identity field — it's never empty.
@@ -211,7 +241,7 @@ policies:
 ```
 
 ```bash
-npx @port-authority/manifest --server "your-server" --policy manifest.policy.yml
+manifest proxy --server "your-server" --policy manifest.policy.yml
 ```
 
 Full OPA/Rego integration is on the roadmap for enterprise use cases.
@@ -238,7 +268,8 @@ This is still more than any enterprise currently has.
 - [x] Receipt generation (JSON-LD + Ed25519 + Merkle tree)
 - [x] CLI tooling (`log`, `inspect`, `export`)
 - [x] Agent identity (auto-detect from MCP handshake + config file + environment)
-- [ ] YAML policy engine (spending limits, tool allowlists, PII flags)
+- [x] YAML policy engine (tool allowlists, spending limit schema)
+- [ ] Policy evaluation (spending limit enforcement, PII detection)
 - [ ] HTTP/SSE MCP transport support
 - [ ] REST API interception (requires per-API config)
 - [ ] OPA/Rego policy integration

@@ -1,0 +1,22 @@
+[package]
+name = "manifest-proxy"
+description = "Async stdio proxy for MCP tool call interception and receipt generation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+manifest-core = { path = "../manifest-core" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+shell-words = "1"
+hex = "0.4"
+
+[dev-dependencies]
+tempfile = "3"

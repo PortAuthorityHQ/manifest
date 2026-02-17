@@ -1,0 +1,14 @@
+[package]
+name = "mock-mcp-server"
+description = "Mock MCP server for testing the manifest proxy"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[[bin]]
+name = "mock-mcp-server"
+path = "src/main.rs"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true

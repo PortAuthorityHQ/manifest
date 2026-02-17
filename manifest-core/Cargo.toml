@@ -1,0 +1,24 @@
+[package]
+name = "manifest-core"
+description = "Core types, cryptographic signing, Merkle tree, and storage for manifest receipts"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+thiserror.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+ed25519-dalek = { version = "2", features = ["rand_core", "batch"] }
+sha2 = "0.10"
+rand = "0.8"
+rusqlite = { version = "0.32", features = ["bundled"] }
+base64 = "0.22"
+hex = "0.4"
+hostname = "0.4"
+
+[dev-dependencies]
+tempfile = "3"
