@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "manifest-sdk"
+version = "0.1.0"
+description = "Cryptographic receipts for AI agent tool calls"
+readme = "README.md"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.10"
+dependencies = [
+    "cryptography>=41.0",
+    "pyyaml>=6.0",
+]
+keywords = ["ai", "agent", "mcp", "audit", "cryptographic", "receipts", "compliance"]
+
+[project.urls]
+Homepage = "https://github.com/PortAuthorityHQ/manifest"
+Repository = "https://github.com/PortAuthorityHQ/manifest"
+
+[tool.setuptools.packages.find]
+include = ["manifest_sdk*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

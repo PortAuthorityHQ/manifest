@@ -441,6 +441,28 @@ manifest export --session <session-id> --sink http://collector.example.com/recei
 
 Authentication is via `--sink-token`, which sets the `Authorization: Bearer <token>` header. Sink export is best-effort — failures are logged but never block receipt generation.
 
+## Python SDK
+
+For agents that don't use MCP, the Python SDK generates the same cross-verifiable receipts:
+
+```bash
+pip install manifest-sdk
+```
+
+```python
+from manifest_sdk import Manifest
+
+m = Manifest(identity="my-agent", db="receipts.db")
+
+receipt = m.record(
+    tool="send_email",
+    input={"to": "bob@example.com", "subject": "Hello"},
+    output={"status": "sent"}
+)
+```
+
+Same signing (Ed25519), hashing (SHA-256), Merkle tree, and canonical JSON as the Rust CLI — receipts are cross-verifiable with `manifest verify`. Includes policy evaluation, SQLite storage (shared schema), and receipt chaining. See [`sdk/python/`](sdk/python/) for docs.
+
 ## Known Limitations
 
 **Spending limits check all numeric values by default.** Without `field_path`, the spending limit policy scans every numeric value in the JSON input recursively. A tool call like `{"page": 50000, "limit": 100}` would trigger a violation for the pagination parameter. Use `field_path: "$.amount"` to specify which field represents monetary value.
@@ -478,17 +500,11 @@ This is still more than any enterprise currently has.
 - [x] Real-time violation alerts (`--webhook`)
 - [x] Storage trait abstraction (`StorageBackend` for pluggable backends)
 - [x] SIEM export (`--sink` for real-time streaming + batch export to Splunk HEC, Sentinel, any HTTP endpoint)
-
-### Post-Launch Priorities
-
-**Receipt format specification.** Publish a formal spec for the manifest receipt format so third-party tools can generate and verify receipts independently. If the receipt format becomes the standard for AI agent accountability, that's the moat — not the proxy itself.
-
-**Verifier SDK.** Standalone libraries (Rust, Python, JS) that verify manifest receipts without requiring the CLI. This makes receipts portable: an auditor verifies a receipt in a Jupyter notebook, a CI pipeline verifies receipts in a GitHub Action, a compliance dashboard verifies receipts in the browser.
+- [x] Python SDK (`manifest-sdk` — pure Python receipt generation, cross-verifiable with Rust CLI)
 
 ### Future
 
 - [ ] Receipt format spec (formal, versioned, third-party verifiable)
-- [ ] Verifier SDK (Rust, Python, JS — verify receipts without the CLI)
 - [ ] S3/cloud storage export (complement the HTTP sink with direct object storage)
 - [ ] OPA/Rego policy integration
 - [ ] REST/gRPC API interception
