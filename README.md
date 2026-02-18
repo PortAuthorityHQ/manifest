@@ -363,6 +363,7 @@ Additional options:
 
 - `--webhook <URL>` — POST policy violation alerts to a webhook (Slack, PagerDuty, etc.)
 - `--rate-limit 100` — Limit to 100 requests per second (excess gets 429)
+- `--sink <URL>` — Stream receipts to a SIEM endpoint in real-time (see [SIEM Export](#siem-export))
 - A `/health` endpoint returns `{"status":"ok"}` for load balancer probes
 
 ### Deploying with TLS
@@ -393,6 +394,52 @@ server {
     }
 }
 ```
+
+## SIEM Export
+
+Stream receipts to your existing security infrastructure in real-time. Works with any HTTP endpoint — Splunk HEC, Microsoft Sentinel, Datadog, or a custom collector.
+
+### Real-Time Streaming
+
+Add `--sink` to either proxy mode to POST each receipt as it's generated:
+
+```bash
+# Stream to any HTTP endpoint (raw JSON)
+manifest proxy --server "your-mcp-server" --sink http://collector.example.com/receipts
+
+# Stream to Splunk HEC
+manifest proxy --server "your-mcp-server" \
+    --sink https://splunk.example.com:8088/services/collector \
+    --sink-token "your-hec-token" \
+    --sink-format splunk-hec
+
+# Works with proxy-http too
+manifest proxy-http --upstream http://localhost:9090/mcp --port 8080 \
+    --sink https://sentinel.example.com/api/logs \
+    --sink-token "your-api-key"
+```
+
+### Batch Export
+
+Export existing receipts to a SIEM sink in bulk:
+
+```bash
+# Export all receipts to Splunk
+manifest export --format json --sink https://splunk.example.com:8088/services/collector \
+    --sink-token "your-hec-token" --sink-format splunk-hec
+
+# Export a specific session
+manifest export --session <session-id> --sink http://collector.example.com/receipts
+```
+
+### Formats
+
+| Format | `--sink-format` | Payload |
+|--------|----------------|---------|
+| **Raw JSON** (default) | `json` | Receipt JSON, `Content-Type: application/json` |
+| **Splunk HEC** | `splunk-hec` | `{"event": <receipt>, "sourcetype": "manifest:receipt", "source": "manifest-proxy"}` |
+
+Authentication is via `--sink-token`, which sets the `Authorization: Bearer <token>` header. Sink export is best-effort — failures are logged but never block receipt generation.
 
 ## Known Limitations
 
@@ -430,6 +477,7 @@ This is still more than any enterprise currently has.
 - [x] HTML export (self-contained, shareable reports)
 - [x] Real-time violation alerts (`--webhook`)
 - [x] Storage trait abstraction (`StorageBackend` for pluggable backends)
+- [x] SIEM export (`--sink` for real-time streaming + batch export to Splunk HEC, Sentinel, any HTTP endpoint)
 
 ### Post-Launch Priorities
 
@@ -437,13 +485,11 @@ This is still more than any enterprise currently has.
 
 **Verifier SDK.** Standalone libraries (Rust, Python, JS) that verify manifest receipts without requiring the CLI. This makes receipts portable: an auditor verifies a receipt in a Jupyter notebook, a CI pipeline verifies receipts in a GitHub Action, a compliance dashboard verifies receipts in the browser.
 
-**SIEM/S3 export.** Enterprise buyers need receipts flowing into their existing Splunk, Sentinel, or S3 pipelines. This is the #1 enterprise adoption blocker — compliance teams don't install CLIs, they query dashboards connected to their log aggregators.
-
 ### Future
 
 - [ ] Receipt format spec (formal, versioned, third-party verifiable)
 - [ ] Verifier SDK (Rust, Python, JS — verify receipts without the CLI)
-- [ ] SIEM/S3 export (Splunk, Sentinel, cloud storage)
+- [ ] S3/cloud storage export (complement the HTTP sink with direct object storage)
 - [ ] OPA/Rego policy integration
 - [ ] REST/gRPC API interception
 - [ ] HSM/KMS key management (key rotation, cloud KMS integration)

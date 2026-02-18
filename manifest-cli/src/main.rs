@@ -37,6 +37,18 @@ enum Commands {
         /// Webhook URL for real-time policy violation alerts
         #[arg(long)]
         webhook: Option<String>,
+
+        /// Sink URL for real-time receipt export (Splunk HEC, HTTP endpoint)
+        #[arg(long)]
+        sink: Option<String>,
+
+        /// Bearer token for sink authentication
+        #[arg(long)]
+        sink_token: Option<String>,
+
+        /// Sink payload format (json or splunk-hec)
+        #[arg(long, default_value = "json")]
+        sink_format: String,
     },
 
     /// View recent receipts
@@ -81,6 +93,18 @@ enum Commands {
         /// Path to the SQLite database
         #[arg(long)]
         db: Option<String>,
+
+        /// Sink URL for batch receipt export (Splunk HEC, HTTP endpoint)
+        #[arg(long)]
+        sink: Option<String>,
+
+        /// Bearer token for sink authentication
+        #[arg(long)]
+        sink_token: Option<String>,
+
+        /// Sink payload format (json or splunk-hec)
+        #[arg(long, default_value = "json")]
+        sink_format: String,
     },
 
     /// Verify a receipt's signature and Merkle proof
@@ -138,6 +162,18 @@ enum Commands {
         /// Webhook URL for real-time policy violation alerts
         #[arg(long)]
         webhook: Option<String>,
+
+        /// Sink URL for real-time receipt export (Splunk HEC, HTTP endpoint)
+        #[arg(long)]
+        sink: Option<String>,
+
+        /// Bearer token for sink authentication
+        #[arg(long)]
+        sink_token: Option<String>,
+
+        /// Sink payload format (json or splunk-hec)
+        #[arg(long, default_value = "json")]
+        sink_format: String,
     },
 
     /// Generate a new signing keypair
@@ -190,7 +226,7 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Proxy { server, identity, policy, key, db, webhook } => {
+        Commands::Proxy { server, identity, policy, key, db, webhook, sink, sink_token, sink_format } => {
             commands::proxy::run(
                 &server,
                 identity.as_deref(),
@@ -198,6 +234,9 @@ async fn main() -> anyhow::Result<()> {
                 key.as_deref(),
                 db.as_deref(),
                 webhook.as_deref(),
+                sink.as_deref(),
+                sink_token.as_deref(),
+                &sink_format,
             ).await?;
         }
         Commands::Log { tail, session, db } => {
@@ -206,8 +245,16 @@ async fn main() -> anyhow::Result<()> {
         Commands::Inspect { hash, db } => {
             commands::inspect::run(&hash, db.as_deref())?;
         }
-        Commands::Export { session, format, output, db } => {
-            commands::export::run(session.as_deref(), &format, output.as_deref(), db.as_deref())?;
+        Commands::Export { session, format, output, db, sink, sink_token, sink_format } => {
+            commands::export::run(
+                session.as_deref(),
+                &format,
+                output.as_deref(),
+                db.as_deref(),
+                sink.as_deref(),
+                sink_token.as_deref(),
+                &sink_format,
+            ).await?;
         }
         Commands::Verify { hash, public_key, db, tree_only } => {
             if tree_only {
@@ -222,7 +269,7 @@ async fn main() -> anyhow::Result<()> {
                 commands::verify::run(hash, pk, db.as_deref())?;
             }
         }
-        Commands::ProxyHttp { upstream, port, identity, policy, key, db, token, rate_limit, webhook } => {
+        Commands::ProxyHttp { upstream, port, identity, policy, key, db, token, rate_limit, webhook, sink, sink_token, sink_format } => {
             commands::proxy_http::run(
                 &upstream,
                 port,
@@ -233,6 +280,9 @@ async fn main() -> anyhow::Result<()> {
                 token.as_deref(),
                 rate_limit,
                 webhook.as_deref(),
+                sink.as_deref(),
+                sink_token.as_deref(),
+                &sink_format,
             ).await?;
         }
         Commands::Init { key } => {

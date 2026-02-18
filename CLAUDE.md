@@ -60,6 +60,7 @@ cargo test -p manifest-proxy   # Test just proxy
 | Prune command | `manifest-cli/src/commands/prune.rs` |
 | Watch command | `manifest-cli/src/commands/watch.rs` |
 | Alert config | `manifest-proxy/src/receipt_builder.rs` (AlertConfig, emit_violation_alert) |
+| SIEM sink config | `manifest-proxy/src/receipt_builder.rs` (SinkConfig, export_to_sink) |
 | Homebrew formula | `Formula/manifest.rb` |
 | npm wrapper | `npm/package.json`, `npm/install.js` |
 
@@ -101,3 +102,7 @@ cargo test -p manifest-proxy   # Test just proxy
 - `Proof.countersignatures` is `Option<Vec<Countersignature>>` — always `None` in the open-source CLI. Reserved for future Cloud Vault co-signing. The field is excluded from `canonical_bytes()` and `content_hash()`, so adding countersignatures never invalidates existing signatures.
 - Homebrew formula is in `Formula/manifest.rb`. SHA256 checksums are placeholders — update them at each release.
 - npm wrapper is in `npm/`. The `install.js` script downloads the right binary on `postinstall`. Requires a published GitHub release to work.
+- `SinkConfig` in `receipt_builder.rs` follows the same pattern as `AlertConfig`. Both are `Clone` with an internal `reqwest::Client`. `SinkConfig::none()` creates a no-op config.
+- `--sink`, `--sink-token`, `--sink-format` flags are on `proxy`, `proxy-http`, and `export` commands. The sink format is either `json` (raw receipt) or `splunk-hec` (wrapped in `{"event": ..., "sourcetype": "manifest:receipt"}`).
+- Sink export is best-effort — errors are logged but never fail the receipt pipeline. Same pattern as webhook alerts.
+- `export` command is async (uses `tokio::main`) to support the sink POST loop. The batch sink sends each receipt as a separate HTTP POST.

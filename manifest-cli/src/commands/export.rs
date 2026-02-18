@@ -5,11 +5,16 @@ use manifest_core::{ManifestError, Receipt, Storage, StorageBackend};
 use crate::commands::init::resolve_db_path;
 
 /// Export receipts as JSON, JSONL, or HTML.
-pub fn run(
+///
+/// Optionally sends each receipt to an HTTP sink for SIEM ingestion.
+pub async fn run(
     session: Option<&str>,
     format: &str,
     output: Option<&str>,
     db: Option<&str>,
+    sink_url: Option<&str>,
+    sink_token: Option<&str>,
+    sink_format: &str,
 ) -> Result<(), ManifestError> {
     let db_path = resolve_db_path(db);
 
@@ -53,6 +58,50 @@ pub fn run(
         None => {
             print!("{content}");
         }
+    }
+
+    // Batch export to SIEM sink if configured
+    if let Some(url) = sink_url {
+        let client = reqwest::Client::new();
+        let mut success = 0usize;
+        let mut failed = 0usize;
+
+        for receipt in &receipts {
+            let payload = if sink_format == "splunk-hec" {
+                serde_json::json!({
+                    "event": receipt,
+                    "sourcetype": "manifest:receipt",
+                    "source": "manifest-export",
+                })
+            } else {
+                serde_json::to_value(receipt).unwrap_or_default()
+            };
+
+            let mut req = client.post(url).json(&payload);
+            if let Some(token) = sink_token {
+                req = req.header("Authorization", format!("Bearer {token}"));
+            }
+
+            match req.send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    success += 1;
+                }
+                Ok(resp) => {
+                    eprintln!(
+                        "Sink returned {} for receipt {}",
+                        resp.status(),
+                        receipt.id
+                    );
+                    failed += 1;
+                }
+                Err(e) => {
+                    eprintln!("Sink error for receipt {}: {e}", receipt.id);
+                    failed += 1;
+                }
+            }
+        }
+
+        eprintln!("Sink export: {success} sent, {failed} failed");
     }
 
     Ok(())

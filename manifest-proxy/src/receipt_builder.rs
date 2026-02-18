@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
 use manifest_core::{
-    Action, ActionError, MerkleTree, ReceiptBuilder, Signer, Storage, StorageBackend,
+    Action, ActionError, MerkleTree, Receipt, ReceiptBuilder, Signer, Storage, StorageBackend,
 };
 use tokio::sync::mpsc;
 
@@ -25,6 +25,48 @@ impl AlertConfig {
 
     pub fn none() -> Self {
         Self { webhook_url: None, client: None }
+    }
+}
+
+/// Configuration for real-time receipt export to SIEM systems.
+///
+/// Supports two formats:
+/// - `json`: Raw receipt JSON (works with any HTTP endpoint)
+/// - `splunk-hec`: Splunk HTTP Event Collector envelope
+#[derive(Clone)]
+pub struct SinkConfig {
+    /// HTTP endpoint URL to POST receipts to.
+    pub sink_url: Option<String>,
+    /// Optional Bearer token for authentication.
+    pub sink_token: Option<String>,
+    /// Payload format: "json" or "splunk-hec".
+    pub sink_format: String,
+    /// HTTP client for sink calls (reused across exports).
+    client: Option<reqwest::Client>,
+}
+
+impl SinkConfig {
+    pub fn new(
+        sink_url: Option<String>,
+        sink_token: Option<String>,
+        sink_format: String,
+    ) -> Self {
+        let client = sink_url.as_ref().map(|_| reqwest::Client::new());
+        Self {
+            sink_url,
+            sink_token,
+            sink_format,
+            client,
+        }
+    }
+
+    pub fn none() -> Self {
+        Self {
+            sink_url: None,
+            sink_token: None,
+            sink_format: "json".to_string(),
+            client: None,
+        }
     }
 }
 
@@ -95,6 +137,7 @@ pub async fn receipt_worker(
     merkle: Arc<Mutex<MerkleTree>>,
     storage: Arc<Mutex<Storage>>,
     alerts: AlertConfig,
+    sinks: SinkConfig,
 ) {
     while let Some(mut captured) = rx.recv().await {
         // Use pre-extracted session info if available (HTTP mode),
@@ -144,7 +187,10 @@ pub async fn receipt_worker(
         .await;
 
         match result {
-            Ok(Ok(())) => {}
+            Ok(Ok(receipt)) => {
+                // Export to SIEM sink if configured
+                export_to_sink(&sinks, &receipt).await;
+            }
             Ok(Err(e)) => {
                 tracing::error!(tool = %tool_name, error = %e, "failed to generate receipt");
             }
@@ -155,6 +201,47 @@ pub async fn receipt_worker(
     }
 
     tracing::debug!("receipt worker shutting down");
+}
+
+/// Export a receipt to the configured SIEM sink.
+///
+/// Best-effort: logs errors but never fails the receipt pipeline.
+async fn export_to_sink(config: &SinkConfig, receipt: &Receipt) {
+    let (Some(ref url), Some(ref client)) = (&config.sink_url, &config.client) else {
+        return;
+    };
+
+    let payload = if config.sink_format == "splunk-hec" {
+        serde_json::json!({
+            "event": receipt,
+            "sourcetype": "manifest:receipt",
+            "source": "manifest-proxy",
+        })
+    } else {
+        serde_json::to_value(receipt).unwrap_or_default()
+    };
+
+    let mut req = client.post(url).json(&payload);
+    if let Some(ref token) = config.sink_token {
+        req = req.header("Authorization", format!("Bearer {token}"));
+    }
+
+    match req.send().await {
+        Ok(resp) => {
+            tracing::debug!(
+                status = %resp.status(),
+                receipt_id = %receipt.id,
+                "receipt exported to sink"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                receipt_id = %receipt.id,
+                "failed to export receipt to sink"
+            );
+        }
+    }
 }
 
 /// Emit a real-time alert for policy violations.
@@ -220,7 +307,7 @@ fn process_captured_call(
     signer: &Signer,
     merkle: &Arc<Mutex<MerkleTree>>,
     storage: &Arc<Mutex<Storage>>,
-) -> Result<(), manifest_core::ManifestError> {
+) -> Result<Receipt, manifest_core::ManifestError> {
     // Get previous receipt hash for chaining
     let prev_hash = {
         let store = storage.lock().map_err(|e| {
@@ -289,7 +376,7 @@ fn process_captured_call(
         "receipt generated"
     );
 
-    Ok(())
+    Ok(receipt)
 }
 
 /// Maximum serialized size (in bytes) for input/output before truncation.

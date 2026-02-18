@@ -5,7 +5,7 @@ use manifest_core::{
     AgentIdentity, ManifestError, MerkleTree, PolicyConfig, Signer, Storage, StorageBackend,
 };
 use manifest_proxy::child::ChildProcess;
-use manifest_proxy::receipt_builder::{receipt_worker, AlertConfig};
+use manifest_proxy::receipt_builder::{receipt_worker, AlertConfig, SinkConfig};
 use manifest_proxy::relay::run_relay;
 use manifest_proxy::session::McpSession;
 use tokio::io::BufReader;
@@ -21,6 +21,9 @@ pub async fn run(
     key_path: Option<&str>,
     db_path: Option<&str>,
     webhook_url: Option<&str>,
+    sink_url: Option<&str>,
+    sink_token: Option<&str>,
+    sink_format: &str,
 ) -> Result<(), ManifestError> {
     let key_file = resolve_key_path(key_path);
     let db_file = resolve_db_path(db_path);
@@ -85,8 +88,13 @@ pub async fn run(
     let worker_merkle = merkle.clone();
     let worker_storage = storage.clone();
     let alerts = AlertConfig::new(webhook_url.map(|s| s.to_string()));
+    let sinks = SinkConfig::new(
+        sink_url.map(|s| s.to_string()),
+        sink_token.map(|s| s.to_string()),
+        sink_format.to_string(),
+    );
     let worker_handle = tokio::spawn(async move {
-        receipt_worker(receipt_rx, worker_session, worker_signer, worker_merkle, worker_storage, alerts).await;
+        receipt_worker(receipt_rx, worker_session, worker_signer, worker_merkle, worker_storage, alerts, sinks).await;
     });
 
     // Run the relay (blocks until agent or child disconnects)
