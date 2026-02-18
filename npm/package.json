@@ -1,6 +1,6 @@
 {
   "name": "@portauthority/manifest",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Cryptographic receipts for AI agent tool calls",
   "license": "Apache-2.0",
   "repository": {
@@ -18,13 +18,14 @@
     "compliance"
   ],
   "bin": {
-    "manifest": "bin/manifest"
+    "manifest": "run.js"
   },
   "scripts": {
     "postinstall": "node install.js"
   },
   "files": [
     "install.js",
+    "run.js",
     "bin/"
   ],
   "engines": {
