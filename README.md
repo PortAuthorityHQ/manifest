@@ -65,6 +65,14 @@ npm install -g @portauthority/manifest
 manifest init
 ```
 
+### Python SDK (pip)
+
+```bash
+pip install manifest-sdk
+```
+
+For agents that don't use MCP. See [Python SDK](#python-sdk) below.
+
 ### Pre-built binaries
 
 Download the latest release for your platform from [GitHub Releases](https://github.com/PortAuthorityHQ/manifest/releases):
