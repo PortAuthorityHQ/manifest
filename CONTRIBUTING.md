@@ -52,7 +52,7 @@ cargo clippy -- -W clippy::all
 
 ## Reporting issues
 
-Open an issue at [github.com/port-authority/manifest/issues](https://github.com/port-authority/manifest/issues).
+Open an issue at [github.com/PortAuthorityHQ/manifest/issues](https://github.com/PortAuthorityHQ/manifest/issues).
 
 ## License
 

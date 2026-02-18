@@ -68,10 +68,10 @@ if (currentAsset) {
 
 // Test: download URL format
 const VERSION = "0.1.0";
-const REPO = "port-authority/manifest";
+const REPO = "PortAuthorityHQ/manifest";
 const url = `https://github.com/${REPO}/releases/download/v${VERSION}/${PLATFORM_MAP["darwin-arm64"]}`;
 assert(
-  url === "https://github.com/port-authority/manifest/releases/download/v0.1.0/manifest-aarch64-apple-darwin.tar.gz",
+  url === "https://github.com/PortAuthorityHQ/manifest/releases/download/v0.1.0/manifest-aarch64-apple-darwin.tar.gz",
   "Download URL format is correct"
 );
 

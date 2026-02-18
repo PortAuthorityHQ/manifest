@@ -9,7 +9,7 @@ const https = require("https");
 const http = require("http");
 
 const VERSION = require("./package.json").version;
-const REPO = "port-authority/manifest";
+const REPO = "PortAuthorityHQ/manifest";
 
 const PLATFORM_MAP = {
   "darwin-arm64": "manifest-aarch64-apple-darwin.tar.gz",

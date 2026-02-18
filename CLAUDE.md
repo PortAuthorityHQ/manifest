@@ -95,7 +95,7 @@ cargo test -p manifest-proxy   # Test just proxy
 - `StorageBackend` trait in `manifest-core/src/storage.rs` — all storage methods are on the trait, not inherent. Any file calling `Storage` methods must `use manifest_core::StorageBackend` or the methods won't resolve.
 - `SpendingLimit` has an optional `field_path` for targeting specific JSON fields (dot notation `$.amount` or JSON pointer `/order/total`). When `None`, falls back to scanning all numeric values.
 - `manifest verify --tree-only` validates Merkle tree structural integrity without needing a receipt hash or public key. Useful after pruning.
-- GitHub Actions: `ci.yml` runs on push/PR to main (build + test + both e2e). `release.yml` triggers on `v*` tags and builds binaries for 4 targets (linux x86_64/aarch64, macOS x86_64/aarch64).
+- GitHub Actions: `ci.yml` runs on push/PR to main (build + test + both e2e). `release.yml` triggers on `v*` tags and: (1) builds binaries for 4 targets, (2) generates `checksums.txt` and attaches it to the release, (3) auto-updates the Homebrew tap formula with real SHA256s via `HOMEBREW_TAP_TOKEN` secret, (4) verifies the npm postinstall binary download on Linux and macOS.
 - HTTP proxy reqwest client has explicit `connect_timeout(5s)` and `timeout(30s)`. Body reads also have a 30s timeout returning 504 GATEWAY_TIMEOUT.
 - HTTP proxy caps at 10,000 concurrent sessions (`MAX_SESSIONS`). New sessions beyond the cap get 503. Session cleanup happens on DELETE regardless of upstream success.
 - `escape_html` in export.rs escapes `&` first to prevent double-escaping. Order matters — don't reorder the replace chain.

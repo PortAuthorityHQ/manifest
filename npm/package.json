@@ -5,9 +5,9 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/port-authority/manifest"
+    "url": "https://github.com/PortAuthorityHQ/manifest"
   },
-  "homepage": "https://github.com/port-authority/manifest",
+  "homepage": "https://github.com/PortAuthorityHQ/manifest",
   "keywords": [
     "ai",
     "agent",

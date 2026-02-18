@@ -50,7 +50,7 @@ AI agents are moving money, accessing PII, and making consequential decisions. B
 ### Homebrew (macOS / Linux)
 
 ```bash
-brew tap port-authority/manifest
+brew tap PortAuthorityHQ/manifest
 brew install manifest
 ```
 
@@ -67,23 +67,23 @@ manifest init
 
 ### Pre-built binaries
 
-Download the latest release for your platform from [GitHub Releases](https://github.com/port-authority/manifest/releases):
+Download the latest release for your platform from [GitHub Releases](https://github.com/PortAuthorityHQ/manifest/releases):
 
 ```bash
 # macOS (Apple Silicon)
-curl -L https://github.com/port-authority/manifest/releases/latest/download/manifest-aarch64-apple-darwin.tar.gz | tar xz
+curl -L https://github.com/PortAuthorityHQ/manifest/releases/latest/download/manifest-aarch64-apple-darwin.tar.gz | tar xz
 sudo mv manifest /usr/local/bin/
 
 # macOS (Intel)
-curl -L https://github.com/port-authority/manifest/releases/latest/download/manifest-x86_64-apple-darwin.tar.gz | tar xz
+curl -L https://github.com/PortAuthorityHQ/manifest/releases/latest/download/manifest-x86_64-apple-darwin.tar.gz | tar xz
 sudo mv manifest /usr/local/bin/
 
 # Linux (x86_64)
-curl -L https://github.com/port-authority/manifest/releases/latest/download/manifest-x86_64-unknown-linux-gnu.tar.gz | tar xz
+curl -L https://github.com/PortAuthorityHQ/manifest/releases/latest/download/manifest-x86_64-unknown-linux-gnu.tar.gz | tar xz
 sudo mv manifest /usr/local/bin/
 
 # Linux (ARM64)
-curl -L https://github.com/port-authority/manifest/releases/latest/download/manifest-aarch64-unknown-linux-gnu.tar.gz | tar xz
+curl -L https://github.com/PortAuthorityHQ/manifest/releases/latest/download/manifest-aarch64-unknown-linux-gnu.tar.gz | tar xz
 sudo mv manifest /usr/local/bin/
 ```
 
@@ -92,7 +92,7 @@ sudo mv manifest /usr/local/bin/
 Requires [Rust](https://rustup.rs/) (1.70+).
 
 ```bash
-git clone https://github.com/port-authority/manifest.git
+git clone https://github.com/PortAuthorityHQ/manifest.git
 cd manifest
 cargo build --release
 
