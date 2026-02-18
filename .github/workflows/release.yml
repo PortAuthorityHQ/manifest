@@ -167,29 +167,56 @@ jobs:
           git commit -m "Update manifest to ${{ github.ref_name }}"
           git push
 
-  verify-npm:
-    name: Verify npm Install
+  publish-npm:
+    name: Publish to npm
     needs: release
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+          registry-url: https://registry.npmjs.org
 
-      - name: Test npm postinstall binary download
+      - name: Update version from tag
+        run: |
+          VERSION="${{ github.ref_name }}"
+          VERSION="${VERSION#v}"
+          cd npm
+          npm version "$VERSION" --no-git-tag-version
+
+      - name: Publish to npm
         run: |
           cd npm
-          npm install --ignore-scripts
-          node install.js
-          ./bin/manifest --version
+          npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      - name: Verify binary works
+  publish-pypi:
+    name: Publish to PyPI
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Update version from tag
         run: |
-          cd npm
-          ./bin/manifest init --key /tmp/test-manifest-key
-          echo "npm install verification passed"
+          VERSION="${{ github.ref_name }}"
+          VERSION="${VERSION#v}"
+          cd sdk/python
+          sed -i "s/version = \".*\"/version = \"$VERSION\"/" pyproject.toml
+
+      - name: Build and publish
+        run: |
+          cd sdk/python
+          pip install build twine
+          python -m build
+          twine upload dist/*
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
