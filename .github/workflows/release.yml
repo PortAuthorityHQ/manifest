@@ -260,15 +260,15 @@ jobs:
           " "$VERSION"
 
       - name: Build sdist
-        uses: PyO3/maturin-action@v1
-        with:
-          command: sdist
-          args: -m manifest-py/Cargo.toml
+        run: |
+          pip install maturin
+          cd sdk/python
+          maturin sdist
 
       - name: Upload sdist to PyPI
         run: |
           pip install twine
-          twine upload --skip-existing target/wheels/*.tar.gz
+          twine upload --skip-existing sdk/python/target/wheels/*.tar.gz
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
