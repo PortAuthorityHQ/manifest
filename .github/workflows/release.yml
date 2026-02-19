@@ -214,8 +214,11 @@ jobs:
         run: |
           VERSION="${{ github.ref_name }}"
           VERSION="${VERSION#v}"
-          cd sdk/python
-          sed -i "s/version = \".*\"/version = \"$VERSION\"/" pyproject.toml
+          python -c "
+          import re, pathlib
+          p = pathlib.Path('sdk/python/pyproject.toml')
+          p.write_text(re.sub(r'version = \".*\"', f'version = \"$VERSION\"', p.read_text()))
+          "
 
       - name: Build and publish wheel
         uses: PyO3/maturin-action@v1
@@ -236,8 +239,11 @@ jobs:
         run: |
           VERSION="${{ github.ref_name }}"
           VERSION="${VERSION#v}"
-          cd sdk/python
-          sed -i "s/version = \".*\"/version = \"$VERSION\"/" pyproject.toml
+          python -c "
+          import re, pathlib
+          p = pathlib.Path('sdk/python/pyproject.toml')
+          p.write_text(re.sub(r'version = \".*\"', f'version = \"$VERSION\"', p.read_text()))
+          "
 
       - name: Build and publish sdist
         uses: PyO3/maturin-action@v1
