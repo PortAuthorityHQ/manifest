@@ -249,6 +249,6 @@ jobs:
         uses: PyO3/maturin-action@v1
         with:
           command: publish
-          args: -m manifest-py/Cargo.toml --sdist
+          args: -m manifest-py/Cargo.toml
         env:
           MATURIN_PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
