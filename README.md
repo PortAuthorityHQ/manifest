@@ -17,7 +17,7 @@ Agent  ──►  manifest proxy  ──►  MCP Server
 ```bash
 brew install PortAuthorityHQ/manifest/manifest    # macOS / Linux
 npm install -g @portauthority/manifest             # Node.js
-pip install manifest-sdk                           # Python SDK (non-MCP agents)
+pip install manifest-sdk                           # Python SDK — native Rust bindings (non-MCP agents)
 ```
 
 ## Quick Start
@@ -160,12 +160,16 @@ Rules without `agents` apply to everyone. Rules with `agents` only apply to the 
 
 ## Python SDK
 
-For agents that don't use MCP:
+For agents that don't use MCP. Native Rust bindings via [PyO3](https://pyo3.rs) — identical crypto, storage, and policy engine as the CLI. No pure-Python reimplementation, no performance gap.
+
+```bash
+pip install manifest-sdk
+```
 
 ```python
 from manifest_sdk import Manifest
 
-m = Manifest(identity="my-agent", db="receipts.db")
+m = Manifest(identity="my-agent", db="receipts.db", policy="policy.yaml")
 receipt = m.record(
     tool="send_email",
     input={"to": "bob@example.com"},
@@ -173,7 +177,16 @@ receipt = m.record(
 )
 ```
 
-Same Ed25519 signing, SHA-256 hashing, and Merkle tree as the Rust CLI. Receipts are cross-verifiable with `manifest verify`. See [`sdk/python/`](sdk/python/).
+The SDK includes its own CLI — same commands as the Rust binary:
+
+```bash
+manifest-py log --tail 5 --db receipts.db
+manifest-py inspect --latest --db receipts.db
+manifest-py export --format html --output report.html --db receipts.db
+manifest-py verify --tree-only --db receipts.db
+```
+
+Receipts from the Python SDK and the Rust CLI are cross-verifiable — same Ed25519 signatures, SHA-256 hashes, and Merkle tree. See [`sdk/python/`](sdk/python/).
 
 ## Docs
 

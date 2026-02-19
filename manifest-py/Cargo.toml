@@ -1,0 +1,15 @@
+[package]
+name = "manifest-py"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "manifest_py"
+crate-type = ["cdylib"]
+
+[dependencies]
+manifest-core = { path = "../manifest-core" }
+pyo3 = { version = "0.23", features = ["extension-module"] }
+serde_json = "1"
+pythonize = "0.23"
+chrono = "0.4"

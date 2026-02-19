@@ -1,6 +1,6 @@
 [build-system]
-requires = ["setuptools>=68.0"]
-build-backend = "setuptools.build_meta"
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
 
 [project]
 name = "manifest-sdk"
@@ -9,18 +9,20 @@ description = "Cryptographic receipts for AI agent tool calls"
 readme = "README.md"
 license = {text = "Apache-2.0"}
 requires-python = ">=3.10"
-dependencies = [
-    "cryptography>=41.0",
-    "pyyaml>=6.0",
-]
 keywords = ["ai", "agent", "mcp", "audit", "cryptographic", "receipts", "compliance"]
+
+[project.scripts]
+manifest-py = "manifest_sdk.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/PortAuthorityHQ/manifest"
 Repository = "https://github.com/PortAuthorityHQ/manifest"
 
-[tool.setuptools.packages.find]
-include = ["manifest_sdk*"]
+[tool.maturin]
+manifest-path = "../../manifest-py/Cargo.toml"
+python-packages = ["manifest_sdk"]
+module-name = "manifest_py"
+features = ["pyo3/extension-module"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
