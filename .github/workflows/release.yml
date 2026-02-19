@@ -263,12 +263,12 @@ jobs:
         run: |
           pip install maturin
           cd sdk/python
-          maturin sdist
+          maturin sdist --out ../../dist
 
       - name: Upload sdist to PyPI
         run: |
           pip install twine
-          twine upload --skip-existing sdk/python/target/wheels/*.tar.gz
+          twine upload --skip-existing dist/*.tar.gz
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
