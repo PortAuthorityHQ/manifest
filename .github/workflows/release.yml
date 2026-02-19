@@ -214,19 +214,27 @@ jobs:
         run: |
           VERSION="${{ github.ref_name }}"
           VERSION="${VERSION#v}"
-          python -c "
-          import re, pathlib
-          p = pathlib.Path('sdk/python/pyproject.toml')
-          p.write_text(re.sub(r'version = \".*\"', f'version = \"$VERSION\"', p.read_text()))
-          "
+          python3 -c "
+          import re, pathlib, sys
+          v = sys.argv[1]
+          for name in ['sdk/python/pyproject.toml', 'manifest-py/Cargo.toml']:
+              p = pathlib.Path(name)
+              p.write_text(re.sub(r'version = \".*?\"', 'version = \"' + v + '\"', p.read_text(), count=1))
+          " "$VERSION"
 
-      - name: Build and publish wheel
+      - name: Build wheel
         uses: PyO3/maturin-action@v1
         with:
-          command: publish
-          args: -m manifest-py/Cargo.toml --no-sdist
+          command: build
+          args: --release -m manifest-py/Cargo.toml
+
+      - name: Upload to PyPI
+        run: |
+          pip install twine
+          twine upload --skip-existing target/wheels/*.whl
         env:
-          MATURIN_PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
 
   publish-pypi-sdist:
     name: Publish source distribution to PyPI
@@ -235,20 +243,34 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
       - name: Update version from tag
         run: |
           VERSION="${{ github.ref_name }}"
           VERSION="${VERSION#v}"
-          python -c "
-          import re, pathlib
-          p = pathlib.Path('sdk/python/pyproject.toml')
-          p.write_text(re.sub(r'version = \".*\"', f'version = \"$VERSION\"', p.read_text()))
-          "
+          python3 -c "
+          import re, pathlib, sys
+          v = sys.argv[1]
+          for name in ['sdk/python/pyproject.toml', 'manifest-py/Cargo.toml']:
+              p = pathlib.Path(name)
+              p.write_text(re.sub(r'version = \".*?\"', 'version = \"' + v + '\"', p.read_text(), count=1))
+          " "$VERSION"
 
-      - name: Build and publish sdist
+      - name: Build sdist
         uses: PyO3/maturin-action@v1
         with:
-          command: publish
+          command: sdist
           args: -m manifest-py/Cargo.toml
+
+      - name: Upload sdist to PyPI
+        run: |
+          pip install twine
+          twine upload --skip-existing target/wheels/*.tar.gz
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
         env:
           MATURIN_PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
