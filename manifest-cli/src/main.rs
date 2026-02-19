@@ -61,6 +61,14 @@ enum Commands {
         #[arg(long)]
         session: Option<String>,
 
+        /// Filter by tool name
+        #[arg(long)]
+        tool: Option<String>,
+
+        /// Output format (table, json, jsonl)
+        #[arg(long, default_value = "table")]
+        format: String,
+
         /// Path to the SQLite database
         #[arg(long)]
         db: Option<String>,
@@ -68,8 +76,12 @@ enum Commands {
 
     /// Show full receipt detail
     Inspect {
-        /// Receipt content hash or ID
-        hash: String,
+        /// Receipt content hash or ID (optional with --latest)
+        hash: Option<String>,
+
+        /// Show the most recent receipt
+        #[arg(long)]
+        latest: bool,
 
         /// Path to the SQLite database
         #[arg(long)]
@@ -239,11 +251,11 @@ async fn main() -> anyhow::Result<()> {
                 &sink_format,
             ).await?;
         }
-        Commands::Log { tail, session, db } => {
-            commands::log::run(tail, session.as_deref(), db.as_deref())?;
+        Commands::Log { tail, session, tool, format, db } => {
+            commands::log::run(tail, session.as_deref(), tool.as_deref(), &format, db.as_deref())?;
         }
-        Commands::Inspect { hash, db } => {
-            commands::inspect::run(&hash, db.as_deref())?;
+        Commands::Inspect { hash, latest, db } => {
+            commands::inspect::run(hash.as_deref(), latest, db.as_deref())?;
         }
         Commands::Export { session, format, output, db, sink, sink_token, sink_format } => {
             commands::export::run(
@@ -263,10 +275,22 @@ async fn main() -> anyhow::Result<()> {
                 let hash = hash.as_deref().ok_or_else(|| {
                     anyhow::anyhow!("receipt hash is required (or use --tree-only)")
                 })?;
-                let pk = public_key.as_deref().ok_or_else(|| {
-                    anyhow::anyhow!("--public-key is required (or use --tree-only)")
-                })?;
-                commands::verify::run(hash, pk, db.as_deref())?;
+                let default_pub_key = dirs::home_dir()
+                    .map(|h| h.join(".manifest").join("signing.key.pub"))
+                    .unwrap_or_default();
+                let pk = match public_key.as_deref() {
+                    Some(p) => p.to_string(),
+                    None => {
+                        if default_pub_key.exists() {
+                            default_pub_key.to_string_lossy().to_string()
+                        } else {
+                            return Err(anyhow::anyhow!(
+                                "--public-key is required (no default key found at ~/.manifest/signing.key.pub)"
+                            ));
+                        }
+                    }
+                };
+                commands::verify::run(hash, &pk, db.as_deref())?;
             }
         }
         Commands::ProxyHttp { upstream, port, identity, policy, key, db, token, rate_limit, webhook, sink, sink_token, sink_format } => {

@@ -33,7 +33,7 @@ mock-mcp-server/   — Test MCP server with echo/add/db_query/fail/slow tools. S
 
 ```bash
 cargo build                    # Build all crates
-cargo test                     # Run all 94+ unit tests
+cargo test                     # Run all 125+ unit tests
 bash tests/e2e.sh              # Stdio e2e test (build + proxy + receipts + verify + policy)
 bash tests/e2e_http.sh         # HTTP e2e test (build + HTTP proxy + receipts + verify + auth)
 cargo test -p manifest-core    # Test just core
@@ -65,6 +65,7 @@ cargo test -p manifest-proxy   # Test just proxy
 | npm wrapper | `npm/package.json`, `npm/install.js` |
 | Python SDK | `sdk/python/manifest_sdk/` |
 | Python SDK tests | `sdk/python/tests/` |
+| Docs (policy, http, siem, identity, arch) | `docs/` |
 
 ## Python SDK
 
@@ -81,7 +82,7 @@ sdk/python/
 │   ├── identity.py             — AgentIdentity, IdentitySource enum
 │   ├── receipt.py              — Receipt, ReceiptBuilder, Action, Delta, Proof, PolicySnapshot
 │   ├── storage.py              — SQLite storage (same schema as Rust — cross-readable)
-│   └── policy.py               — PolicyConfig, evaluation (tool-allowlist, spending-limit, pii-flag, pii-regex)
+│   └── policy.py               — PolicyConfig, evaluation (tool-allowlist, spending-limit, pii-flag, pii-regex, rate-limit)
 └── tests/                      — 64 tests (pytest)
 ```
 
@@ -108,9 +109,11 @@ cd sdk/python && pip install -e . && pytest tests/ -v
 - The relay spawns agent→child as a separate tokio task. The main task runs child→agent. This is intentional — `tokio::select!` exits on stdin EOF before the child responds.
 - Graceful shutdown: when the relay exits, `receipt_tx` is dropped, closing the channel. The receipt worker drains remaining items. The proxy awaits this with a 10s timeout.
 - Payload truncation happens in the receipt worker (blocking thread), not in the relay. The relay always forwards full payloads.
+- Policy rules: `tool-allowlist`, `spending-limit`, `pii-flag`, `pii-regex`, `rate-limit`. All support per-agent scoping via optional `agents` field on `PolicyEntry`.
 - Policy `pii-flag` does substring matching (fast, false positives). Policy `pii-regex` does regex matching (precise, slower). Both can coexist.
 - HTTP proxy uses per-session state keyed by `Mcp-Session-Id` header. Stdio proxy uses a single shared session. The receipt worker handles both via optional `SessionInfo` on `CapturedToolCall`.
-- Regex patterns in `PolicyConfig` are compiled once via `OnceLock` and cached. Don't construct `PolicyConfig` with struct literal — use `PolicyConfig::new(vec![...])` to ensure the cache field is initialized.
+- Regex patterns in `PolicyConfig` are compiled once via `OnceLock` and cached. Rate-limit counters use `Mutex<HashMap<String, u64>>` keyed by `"agent:tool"`. Don't construct `PolicyConfig` with struct literal — use `PolicyConfig::new(vec![...])` or `PolicyConfig::new_scoped(vec![...])` to ensure internal state fields are initialized.
+- `PolicyEntry` wraps `PolicyRule` with an optional `agents: Vec<String>` field. `PolicyConfig.policies` is `Vec<PolicyEntry>`, not `Vec<PolicyRule>`. Use `PolicyConfig::new()` for global rules (wraps each rule in `PolicyEntry { agents: None, rule }`).
 - `manifest prune` deletes receipts but NOT Merkle leaves — the Merkle tree is append-only by design.
 - HTTP proxy bearer token auth (`--token`) is middleware-based. When set, all requests need `Authorization: Bearer <token>` or get 401.
 - HTTP sessions have a 30-minute idle TTL (configurable via `MANIFEST_SESSION_TTL_SECS` env var). A background reaper task evicts expired sessions every 60 seconds. DELETE requests also clean up sessions immediately.

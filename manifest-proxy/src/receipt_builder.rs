@@ -89,7 +89,7 @@ pub fn extract_session_info(
     output: Option<&serde_json::Value>,
 ) -> SessionInfo {
     let identity = session.identity();
-    let policy_snapshot = session.policy_snapshot();
+    let policy_snapshot = session.policy_snapshot(Some(&identity.name));
     let session_id = session.session_id.clone();
     let (authorized, violations) = session.check_tool(tool_name, input, output);
     let delta = if policy_snapshot.is_some() {

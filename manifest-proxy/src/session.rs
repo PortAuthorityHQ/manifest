@@ -79,13 +79,14 @@ impl McpSession {
     }
 
     /// Get the current policy snapshot (if a policy is configured).
-    pub fn policy_snapshot(&self) -> Option<PolicySnapshot> {
-        self.policy.as_ref().map(|p| p.to_snapshot())
+    pub fn policy_snapshot(&self, agent_name: Option<&str>) -> Option<PolicySnapshot> {
+        self.policy.as_ref().map(|p| p.to_snapshot(agent_name))
     }
 
     /// Check if a tool call is authorized by all policy rules.
     ///
     /// Evaluates tool allowlist, spending limits, and PII detection.
+    /// Only evaluates rules scoped to the current agent.
     /// Returns `(authorized, violations)`.
     pub fn check_tool(
         &self,
@@ -97,7 +98,8 @@ impl McpSession {
             return (true, Vec::new());
         };
 
-        let violations = policy.evaluate(tool_name, input, output);
+        let agent_name = self.identity().name;
+        let violations = policy.evaluate(tool_name, input, output, Some(&agent_name));
         (violations.is_empty(), violations)
     }
 }

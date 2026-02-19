@@ -1,4 +1,5 @@
-use std::sync::OnceLock;
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -19,14 +20,41 @@ pub struct PolicySnapshot {
     pub snapshot: String,
 }
 
+/// A policy rule with optional agent scoping.
+///
+/// When `agents` is `None`, the rule applies to all agents.
+/// When `agents` is `Some`, the rule only applies to agents in the list.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PolicyEntry {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agents: Option<Vec<String>>,
+    #[serde(flatten)]
+    pub rule: PolicyRule,
+}
+
+impl PolicyEntry {
+    /// Check if this rule applies to the given agent name.
+    fn applies_to(&self, agent_name: Option<&str>) -> bool {
+        match (&self.agents, agent_name) {
+            (None, _) => true, // no scope = global rule
+            (Some(_), None) => true, // no agent name known = apply all rules
+            (Some(agents), Some(name)) => agents.iter().any(|a| a == name),
+        }
+    }
+}
+
 /// Top-level policy configuration loaded from YAML.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PolicyConfig {
-    pub policies: Vec<PolicyRule>,
+    pub policies: Vec<PolicyEntry>,
 
     /// Cached compiled regex patterns. Compiled once on first `evaluate()`.
     #[serde(skip)]
     compiled_regex: OnceLock<Vec<(String, Regex)>>,
+
+    /// Per-tool call counters for rate limiting. Key is "agent:tool" or ":tool" (no agent).
+    #[serde(skip)]
+    call_counts: Mutex<HashMap<String, u64>>,
 }
 
 impl Clone for PolicyConfig {
@@ -34,6 +62,7 @@ impl Clone for PolicyConfig {
         let new = Self {
             policies: self.policies.clone(),
             compiled_regex: OnceLock::new(),
+            call_counts: Mutex::new(HashMap::new()),
         };
         // If already compiled, carry over to the clone
         if let Some(patterns) = self.compiled_regex.get() {
@@ -76,14 +105,36 @@ pub enum PolicyRule {
         #[serde(default)]
         custom: std::collections::HashMap<String, String>,
     },
+
+    /// Rate limit: max number of calls to a specific tool per session.
+    #[serde(rename = "rate-limit")]
+    RateLimit {
+        /// Tool name to rate-limit.
+        tool: String,
+        /// Maximum number of calls allowed.
+        max_calls: u64,
+    },
 }
 
 impl PolicyConfig {
-    /// Create a new `PolicyConfig` from a list of rules.
+    /// Create a new `PolicyConfig` from a list of rules (all global scope).
     pub fn new(policies: Vec<PolicyRule>) -> Self {
+        Self {
+            policies: policies
+                .into_iter()
+                .map(|rule| PolicyEntry { agents: None, rule })
+                .collect(),
+            compiled_regex: OnceLock::new(),
+            call_counts: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Create a new `PolicyConfig` from a list of scoped policy entries.
+    pub fn new_scoped(policies: Vec<PolicyEntry>) -> Self {
         Self {
             policies,
             compiled_regex: OnceLock::new(),
+            call_counts: Mutex::new(HashMap::new()),
         }
     }
 
@@ -101,20 +152,25 @@ impl PolicyConfig {
     }
 
     /// Convert to a PolicySnapshot for embedding in receipts.
-    pub fn to_snapshot(&self) -> PolicySnapshot {
+    ///
+    /// When `agent_name` is provided, only includes rules that apply to that agent.
+    pub fn to_snapshot(&self, agent_name: Option<&str>) -> PolicySnapshot {
         let mut max_value = None;
         let mut allowed = None;
 
-        for rule in &self.policies {
-            match rule {
+        for entry in &self.policies {
+            if !entry.applies_to(agent_name) {
+                continue;
+            }
+            match &entry.rule {
                 PolicyRule::SpendingLimit { max_transaction_value, .. } => {
                     max_value = Some(*max_transaction_value);
                 }
                 PolicyRule::ToolAllowlist { allowed_tools } => {
                     allowed = Some(allowed_tools.clone());
                 }
-                PolicyRule::PiiFlag { .. } | PolicyRule::PiiRegex { .. } => {
-                    // PII rules don't appear in the snapshot — they're evaluated at check time
+                PolicyRule::PiiFlag { .. } | PolicyRule::PiiRegex { .. } | PolicyRule::RateLimit { .. } => {
+                    // PII and rate-limit rules don't appear in the snapshot — they're evaluated at check time
                 }
             }
         }
@@ -128,9 +184,12 @@ impl PolicyConfig {
 
     /// Check if a tool name is allowed by the allowlist policy.
     /// Returns None if no allowlist is configured (all tools allowed).
-    pub fn is_tool_allowed(&self, tool_name: &str) -> Option<bool> {
-        for rule in &self.policies {
-            if let PolicyRule::ToolAllowlist { allowed_tools } = rule {
+    pub fn is_tool_allowed(&self, tool_name: &str, agent_name: Option<&str>) -> Option<bool> {
+        for entry in &self.policies {
+            if !entry.applies_to(agent_name) {
+                continue;
+            }
+            if let PolicyRule::ToolAllowlist { allowed_tools } = &entry.rule {
                 return Some(allowed_tools.iter().any(|t| t == tool_name));
             }
         }
@@ -141,8 +200,8 @@ impl PolicyConfig {
     fn compiled_patterns(&self) -> &[(String, Regex)] {
         self.compiled_regex.get_or_init(|| {
             let mut patterns = Vec::new();
-            for rule in &self.policies {
-                if let PolicyRule::PiiRegex { builtin, custom } = rule {
+            for entry in &self.policies {
+                if let PolicyRule::PiiRegex { builtin, custom } = &entry.rule {
                     for name in builtin {
                         if let Some(re) = builtin_pii_regex(name) {
                             patterns.push((name.clone(), re));
@@ -161,6 +220,7 @@ impl PolicyConfig {
 
     /// Evaluate all policy rules against a tool call.
     ///
+    /// When `agent_name` is provided, only rules that apply to that agent are evaluated.
     /// Returns a list of violation strings. An empty list means the action
     /// is fully authorized.
     pub fn evaluate(
@@ -168,11 +228,15 @@ impl PolicyConfig {
         tool_name: &str,
         input: &serde_json::Value,
         output: Option<&serde_json::Value>,
+        agent_name: Option<&str>,
     ) -> Vec<String> {
         let mut violations = Vec::new();
 
-        for rule in &self.policies {
-            match rule {
+        for entry in &self.policies {
+            if !entry.applies_to(agent_name) {
+                continue;
+            }
+            match &entry.rule {
                 PolicyRule::ToolAllowlist { allowed_tools } => {
                     if !allowed_tools.iter().any(|t| t == tool_name) {
                         violations.push(format!(
@@ -238,10 +302,30 @@ impl PolicyConfig {
                         }
                     }
                 }
+                PolicyRule::RateLimit { tool, max_calls } => {
+                    if tool == tool_name {
+                        let key = format!("{}:{}", agent_name.unwrap_or(""), tool);
+                        let mut counts = self.call_counts.lock().unwrap_or_else(|e| e.into_inner());
+                        let count = counts.entry(key).or_insert(0);
+                        *count += 1;
+                        if *count > *max_calls {
+                            violations.push(format!(
+                                "rate_limit_exceeded: '{tool}' called {count} times, max is {max_calls}"
+                            ));
+                        }
+                    }
+                }
             }
         }
 
         violations
+    }
+
+    /// Reset rate limit counters. Called when starting a new session.
+    pub fn reset_rate_limits(&self) {
+        if let Ok(mut counts) = self.call_counts.lock() {
+            counts.clear();
+        }
     }
 }
 
@@ -364,7 +448,7 @@ policies:
                 },
             ]);
 
-        let snapshot = config.to_snapshot();
+        let snapshot = config.to_snapshot(None);
         assert_eq!(snapshot.max_transaction_value, Some(10000));
         assert_eq!(snapshot.allowed_tools, Some(vec!["read_file".to_string()]));
         assert!(snapshot.snapshot.starts_with("sha256:"));
@@ -376,8 +460,8 @@ policies:
                 allowed_tools: vec!["db_query".into(), "send_email".into()],
             }]);
 
-        assert_eq!(config.is_tool_allowed("db_query"), Some(true));
-        assert_eq!(config.is_tool_allowed("drop_table"), Some(false));
+        assert_eq!(config.is_tool_allowed("db_query", None), Some(true));
+        assert_eq!(config.is_tool_allowed("drop_table", None), Some(false));
     }
 
     #[test]
@@ -386,7 +470,7 @@ policies:
                 max_transaction_value: 5000,
                 field_path: None,
             }]);
-        assert_eq!(config.is_tool_allowed("anything"), None);
+        assert_eq!(config.is_tool_allowed("anything", None), None);
     }
 
     #[test]
@@ -397,7 +481,7 @@ policies:
             }]);
 
         let input = serde_json::json!({"amount": 50000, "currency": "USD"});
-        let violations = config.evaluate("transfer", &input, None);
+        let violations = config.evaluate("transfer", &input, None, None);
         assert_eq!(violations.len(), 1);
         assert!(violations[0].contains("spending_limit_exceeded"));
         assert!(violations[0].contains("50000"));
@@ -415,7 +499,7 @@ policies:
                 "items": [{"price": 500}, {"price": 2000}]
             }
         });
-        let violations = config.evaluate("checkout", &input, None);
+        let violations = config.evaluate("checkout", &input, None, None);
         // Only the 2000 value exceeds the limit
         assert_eq!(violations.len(), 1);
         assert!(violations[0].contains("2000"));
@@ -429,7 +513,7 @@ policies:
             }]);
 
         let input = serde_json::json!({"amount": 500});
-        let violations = config.evaluate("transfer", &input, None);
+        let violations = config.evaluate("transfer", &input, None, None);
         assert!(violations.is_empty());
     }
 
@@ -440,7 +524,7 @@ policies:
             }]);
 
         let input = serde_json::json!({"query": "SELECT ssn FROM users"});
-        let violations = config.evaluate("db_query", &input, None);
+        let violations = config.evaluate("db_query", &input, None, None);
         assert_eq!(violations.len(), 1);
         assert!(violations[0].contains("pii_detected_in_input"));
         assert!(violations[0].contains("SSN"));
@@ -454,7 +538,7 @@ policies:
 
         let input = serde_json::json!({"query": "SELECT * FROM payments"});
         let output = serde_json::json!({"rows": [{"credit_card": "4111-1111-1111"}]});
-        let violations = config.evaluate("db_query", &input, Some(&output));
+        let violations = config.evaluate("db_query", &input, Some(&output), None);
         assert_eq!(violations.len(), 1);
         assert!(violations[0].contains("pii_detected_in_output"));
     }
@@ -466,7 +550,7 @@ policies:
             }]);
 
         let input = serde_json::json!({"query": "SELECT name FROM users"});
-        let violations = config.evaluate("db_query", &input, None);
+        let violations = config.evaluate("db_query", &input, None, None);
         assert!(violations.is_empty());
     }
 
@@ -487,7 +571,7 @@ policies:
 
         // Disallowed tool, high value, and PII
         let input = serde_json::json!({"amount": 5000, "field": "ssn"});
-        let violations = config.evaluate("transfer", &input, None);
+        let violations = config.evaluate("transfer", &input, None, None);
         assert_eq!(violations.len(), 3);
     }
 
@@ -500,7 +584,7 @@ policies:
 
         // Actual SSN format triggers
         let input = serde_json::json!({"data": "SSN is 123-45-6789"});
-        let violations = config.evaluate("query", &input, None);
+        let violations = config.evaluate("query", &input, None, None);
         assert_eq!(violations.len(), 1);
         assert!(violations[0].contains("pii_regex_match_in_input"));
         assert!(violations[0].contains("ssn"));
@@ -516,7 +600,7 @@ policies:
         // The word "assign" contains "ssn" as a substring but should NOT trigger
         // the regex detector (unlike the naive string-match PiiFlag)
         let input = serde_json::json!({"action": "assign task to user"});
-        let violations = config.evaluate("task", &input, None);
+        let violations = config.evaluate("task", &input, None, None);
         assert!(violations.is_empty(), "regex should not match 'assign'");
     }
 
@@ -528,7 +612,7 @@ policies:
             }]);
 
         let input = serde_json::json!({"card": "4111111111111111"});
-        let violations = config.evaluate("payment", &input, None);
+        let violations = config.evaluate("payment", &input, None, None);
         assert_eq!(violations.len(), 1);
         assert!(violations[0].contains("credit_card"));
     }
@@ -542,7 +626,7 @@ policies:
 
         let output = serde_json::json!({"result": "Contact: user@example.com"});
         let input = serde_json::json!({});
-        let violations = config.evaluate("query", &input, Some(&output));
+        let violations = config.evaluate("query", &input, Some(&output), None);
         assert_eq!(violations.len(), 1);
         assert!(violations[0].contains("pii_regex_match_in_output"));
     }
@@ -558,7 +642,7 @@ policies:
             }]);
 
         let input = serde_json::json!({"doc": "Passport: A12345678"});
-        let violations = config.evaluate("verify", &input, None);
+        let violations = config.evaluate("verify", &input, None, None);
         assert_eq!(violations.len(), 1);
         assert!(violations[0].contains("passport"));
     }
@@ -571,7 +655,7 @@ policies:
             }]);
 
         let input = serde_json::json!({"contact": "Call (555) 123-4567"});
-        let violations = config.evaluate("lookup", &input, None);
+        let violations = config.evaluate("lookup", &input, None, None);
         assert_eq!(violations.len(), 1);
         assert!(violations[0].contains("phone"));
     }
@@ -585,7 +669,7 @@ policies:
 
         // Only the "amount" field is checked, not "page"
         let input = serde_json::json!({"amount": 100000, "page": 99999});
-        let violations = config.evaluate("transfer", &input, None);
+        let violations = config.evaluate("transfer", &input, None, None);
         assert_eq!(violations.len(), 1);
         assert!(violations[0].contains("100000"));
     }
@@ -599,7 +683,7 @@ policies:
 
         // "page" is high but "amount" is low — should pass
         let input = serde_json::json!({"amount": 100, "page": 99999});
-        let violations = config.evaluate("transfer", &input, None);
+        let violations = config.evaluate("transfer", &input, None, None);
         assert!(violations.is_empty());
     }
 
@@ -611,7 +695,7 @@ policies:
             }]);
 
         let input = serde_json::json!({"order": {"total": 10000, "items": 3}});
-        let violations = config.evaluate("checkout", &input, None);
+        let violations = config.evaluate("checkout", &input, None, None);
         assert_eq!(violations.len(), 1);
         assert!(violations[0].contains("10000"));
     }
@@ -625,7 +709,7 @@ policies:
 
         // Field doesn't exist — no violation (nothing to check)
         let input = serde_json::json!({"quantity": 100000});
-        let violations = config.evaluate("transfer", &input, None);
+        let violations = config.evaluate("transfer", &input, None, None);
         assert!(violations.is_empty());
     }
 
@@ -636,5 +720,308 @@ policies:
                 field_path: None,
             }]);
         assert_eq!(config.snapshot_hash(), config.snapshot_hash());
+    }
+
+    // --- Agent-scoped policy tests ---
+
+    #[test]
+    fn agent_scoped_allowlist() {
+        let config = PolicyConfig::new_scoped(vec![
+            PolicyEntry {
+                agents: Some(vec!["chat-bot".into()]),
+                rule: PolicyRule::ToolAllowlist {
+                    allowed_tools: vec!["db_query".into()],
+                },
+            },
+            PolicyEntry {
+                agents: Some(vec!["buyer-bot".into()]),
+                rule: PolicyRule::ToolAllowlist {
+                    allowed_tools: vec!["db_query".into(), "db_insert".into()],
+                },
+            },
+        ]);
+
+        // chat-bot can query but not insert
+        let input = serde_json::json!({});
+        assert!(config.evaluate("db_query", &input, None, Some("chat-bot")).is_empty());
+        assert_eq!(config.evaluate("db_insert", &input, None, Some("chat-bot")).len(), 1);
+
+        // buyer-bot can do both
+        assert!(config.evaluate("db_query", &input, None, Some("buyer-bot")).is_empty());
+        assert!(config.evaluate("db_insert", &input, None, Some("buyer-bot")).is_empty());
+    }
+
+    #[test]
+    fn global_rule_applies_to_all_agents() {
+        let config = PolicyConfig::new_scoped(vec![
+            // Global PII rule — no agents field
+            PolicyEntry {
+                agents: None,
+                rule: PolicyRule::PiiFlag {
+                    flag_if_contains: vec!["SSN".into()],
+                },
+            },
+            // Scoped allowlist
+            PolicyEntry {
+                agents: Some(vec!["chat-bot".into()]),
+                rule: PolicyRule::ToolAllowlist {
+                    allowed_tools: vec!["db_query".into()],
+                },
+            },
+        ]);
+
+        // PII rule triggers for any agent
+        let input = serde_json::json!({"query": "SELECT ssn FROM users"});
+        let violations = config.evaluate("db_query", &input, None, Some("chat-bot"));
+        assert!(violations.iter().any(|v| v.contains("pii_detected_in_input")));
+
+        let violations = config.evaluate("db_query", &input, None, Some("buyer-bot"));
+        assert!(violations.iter().any(|v| v.contains("pii_detected_in_input")));
+    }
+
+    #[test]
+    fn agent_scoped_spending_limit() {
+        let config = PolicyConfig::new_scoped(vec![
+            PolicyEntry {
+                agents: Some(vec!["buyer-bot".into()]),
+                rule: PolicyRule::SpendingLimit {
+                    max_transaction_value: 10000,
+                    field_path: Some("$.amount".into()),
+                },
+            },
+        ]);
+
+        let input = serde_json::json!({"amount": 50000});
+
+        // buyer-bot hits the spending limit
+        let violations = config.evaluate("purchase", &input, None, Some("buyer-bot"));
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].contains("spending_limit_exceeded"));
+
+        // chat-bot has no spending limit rule — no violations
+        let violations = config.evaluate("purchase", &input, None, Some("chat-bot"));
+        assert!(violations.is_empty());
+    }
+
+    #[test]
+    fn agent_scoped_snapshot() {
+        let config = PolicyConfig::new_scoped(vec![
+            PolicyEntry {
+                agents: Some(vec!["chat-bot".into()]),
+                rule: PolicyRule::ToolAllowlist {
+                    allowed_tools: vec!["db_query".into()],
+                },
+            },
+            PolicyEntry {
+                agents: Some(vec!["buyer-bot".into()]),
+                rule: PolicyRule::SpendingLimit {
+                    max_transaction_value: 10000,
+                    field_path: None,
+                },
+            },
+        ]);
+
+        // chat-bot snapshot shows allowlist but no spending limit
+        let snap = config.to_snapshot(Some("chat-bot"));
+        assert_eq!(snap.allowed_tools, Some(vec!["db_query".to_string()]));
+        assert_eq!(snap.max_transaction_value, None);
+
+        // buyer-bot snapshot shows spending limit but no allowlist
+        let snap = config.to_snapshot(Some("buyer-bot"));
+        assert_eq!(snap.allowed_tools, None);
+        assert_eq!(snap.max_transaction_value, Some(10000));
+    }
+
+    #[test]
+    fn agent_scoped_is_tool_allowed() {
+        let config = PolicyConfig::new_scoped(vec![
+            PolicyEntry {
+                agents: Some(vec!["chat-bot".into()]),
+                rule: PolicyRule::ToolAllowlist {
+                    allowed_tools: vec!["db_query".into()],
+                },
+            },
+        ]);
+
+        // chat-bot has an allowlist
+        assert_eq!(config.is_tool_allowed("db_query", Some("chat-bot")), Some(true));
+        assert_eq!(config.is_tool_allowed("db_insert", Some("chat-bot")), Some(false));
+
+        // buyer-bot has no allowlist — returns None (all tools allowed)
+        assert_eq!(config.is_tool_allowed("db_insert", Some("buyer-bot")), None);
+    }
+
+    #[test]
+    fn load_agent_scoped_policy_from_yaml() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("policy.yml");
+        std::fs::write(
+            &path,
+            r#"
+policies:
+  - name: pii-regex
+    builtin: [ssn]
+  - name: tool-allowlist
+    agents: [chat-bot]
+    allowed_tools: [db_query]
+  - name: tool-allowlist
+    agents: [buyer-bot]
+    allowed_tools: [db_query, db_insert]
+  - name: spending-limit
+    agents: [buyer-bot]
+    max_transaction_value: 10000
+"#,
+        )
+        .unwrap();
+
+        let config = PolicyConfig::load(&path).unwrap();
+        assert_eq!(config.policies.len(), 4);
+
+        // Global PII rule has no agents
+        assert!(config.policies[0].agents.is_none());
+
+        // Scoped rules have agents
+        assert_eq!(config.policies[1].agents, Some(vec!["chat-bot".to_string()]));
+        assert_eq!(config.policies[2].agents, Some(vec!["buyer-bot".to_string()]));
+
+        // Evaluate: chat-bot can't insert
+        let input = serde_json::json!({});
+        let violations = config.evaluate("db_insert", &input, None, Some("chat-bot"));
+        assert!(violations.iter().any(|v| v.contains("tool_not_in_allowlist")));
+
+        // buyer-bot can insert
+        let violations = config.evaluate("db_insert", &input, None, Some("buyer-bot"));
+        assert!(violations.is_empty());
+    }
+
+    // --- Rate limit tests ---
+
+    #[test]
+    fn rate_limit_allows_under_max() {
+        let config = PolicyConfig::new(vec![PolicyRule::RateLimit {
+            tool: "db_query".into(),
+            max_calls: 3,
+        }]);
+
+        let input = serde_json::json!({});
+
+        // First 3 calls are fine
+        assert!(config.evaluate("db_query", &input, None, None).is_empty());
+        assert!(config.evaluate("db_query", &input, None, None).is_empty());
+        assert!(config.evaluate("db_query", &input, None, None).is_empty());
+    }
+
+    #[test]
+    fn rate_limit_flags_over_max() {
+        let config = PolicyConfig::new(vec![PolicyRule::RateLimit {
+            tool: "db_query".into(),
+            max_calls: 2,
+        }]);
+
+        let input = serde_json::json!({});
+
+        // First 2 are fine
+        assert!(config.evaluate("db_query", &input, None, None).is_empty());
+        assert!(config.evaluate("db_query", &input, None, None).is_empty());
+
+        // 3rd call exceeds the limit
+        let violations = config.evaluate("db_query", &input, None, None);
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].contains("rate_limit_exceeded"));
+        assert!(violations[0].contains("3 times"));
+        assert!(violations[0].contains("max is 2"));
+    }
+
+    #[test]
+    fn rate_limit_ignores_other_tools() {
+        let config = PolicyConfig::new(vec![PolicyRule::RateLimit {
+            tool: "db_insert".into(),
+            max_calls: 1,
+        }]);
+
+        let input = serde_json::json!({});
+
+        // db_query is not rate-limited
+        for _ in 0..10 {
+            assert!(config.evaluate("db_query", &input, None, None).is_empty());
+        }
+
+        // db_insert is limited to 1
+        assert!(config.evaluate("db_insert", &input, None, None).is_empty());
+        let violations = config.evaluate("db_insert", &input, None, None);
+        assert!(violations[0].contains("rate_limit_exceeded"));
+    }
+
+    #[test]
+    fn rate_limit_per_agent() {
+        let config = PolicyConfig::new_scoped(vec![PolicyEntry {
+            agents: None,
+            rule: PolicyRule::RateLimit {
+                tool: "db_query".into(),
+                max_calls: 2,
+            },
+        }]);
+
+        let input = serde_json::json!({});
+
+        // agent-a uses 2 calls
+        assert!(config.evaluate("db_query", &input, None, Some("agent-a")).is_empty());
+        assert!(config.evaluate("db_query", &input, None, Some("agent-a")).is_empty());
+
+        // agent-a's 3rd call is blocked
+        assert_eq!(config.evaluate("db_query", &input, None, Some("agent-a")).len(), 1);
+
+        // agent-b still has its own counter — not blocked
+        assert!(config.evaluate("db_query", &input, None, Some("agent-b")).is_empty());
+        assert!(config.evaluate("db_query", &input, None, Some("agent-b")).is_empty());
+    }
+
+    #[test]
+    fn rate_limit_reset() {
+        let config = PolicyConfig::new(vec![PolicyRule::RateLimit {
+            tool: "db_query".into(),
+            max_calls: 1,
+        }]);
+
+        let input = serde_json::json!({});
+
+        assert!(config.evaluate("db_query", &input, None, None).is_empty());
+        assert_eq!(config.evaluate("db_query", &input, None, None).len(), 1);
+
+        // Reset counters (new session)
+        config.reset_rate_limits();
+
+        // Can call again
+        assert!(config.evaluate("db_query", &input, None, None).is_empty());
+    }
+
+    #[test]
+    fn rate_limit_from_yaml() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("policy.yml");
+        std::fs::write(
+            &path,
+            r#"
+policies:
+  - name: rate-limit
+    tool: db_insert
+    max_calls: 5
+  - name: rate-limit
+    agents: [buyer-bot]
+    tool: purchase
+    max_calls: 3
+"#,
+        )
+        .unwrap();
+
+        let config = PolicyConfig::load(&path).unwrap();
+        assert_eq!(config.policies.len(), 2);
+
+        // Verify rate limit works after loading from YAML
+        let input = serde_json::json!({});
+        for _ in 0..5 {
+            assert!(config.evaluate("db_insert", &input, None, None).is_empty());
+        }
+        assert_eq!(config.evaluate("db_insert", &input, None, None).len(), 1);
     }
 }
